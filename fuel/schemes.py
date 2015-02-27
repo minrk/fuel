@@ -1,9 +1,8 @@
 from abc import ABCMeta, abstractmethod
 
 import numpy
-from picklable_itertools import chain, repeat, imap, islice, _iter
+from picklable_itertools import chain, repeat, imap, islice, xrange, iter_
 from six import add_metaclass
-from six.moves import xrange
 
 from fuel import config
 
@@ -126,7 +125,7 @@ class SequentialScheme(BatchScheme):
     """
     def get_request_iterator(self):
         return imap(list, imap(
-            islice, repeat(_iter(xrange(self.num_examples)), self.num_batches),
+            islice, repeat(xrange(self.num_examples), self.num_batches),
             repeat(self.batch_size, self.num_batches)))
 
 
@@ -155,7 +154,7 @@ class ShuffledScheme(BatchScheme):
         indices = list(range(self.num_examples))
         self.rng.shuffle(indices)
         return imap(list, imap(
-            islice, repeat(_iter(indices), self.num_batches),
+            islice, repeat(iter_(indices), self.num_batches),
             repeat(self.batch_size, self.num_batches)))
 
 
@@ -166,7 +165,7 @@ class SequentialExampleScheme(IndexScheme):
 
     """
     def get_request_iterator(self):
-        return _iter(xrange(self.num_examples))
+        return iter_(xrange(self.num_examples))
 
 
 class ShuffledExampleScheme(IndexScheme):
@@ -184,4 +183,4 @@ class ShuffledExampleScheme(IndexScheme):
     def get_request_iterator(self):
         indices = list(range(self.num_examples))
         self.rng.shuffle(indices)
-        return _iter(indices)
+        return iter_(indices)
