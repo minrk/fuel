@@ -1,5 +1,7 @@
 import collections
 
+import six
+
 
 def lazy_property_factory(lazy_property):
     """Create properties that perform lazy loading of attributes."""
@@ -78,3 +80,32 @@ def do_not_pickle_attributes(*lazy_properties):
 
         return cls
     return wrap_class
+
+
+class open_if_filename(object):
+    r"""
+    Context manager that handles both filenames and file-like objects.
+
+    Parameters
+    ----------
+    f : str or file-like object
+        If `f` is a string it is presumed to be a filename on disk,
+        and this context manager will handle opening and closing.
+        Otherwise, `f` is presumed to be a file-like object, open
+        in the right mode for the desired operations.
+    """
+    def __init__(self, f, *args, **kwargs):
+        self._f = f
+        self._args = args
+        self._kwargs = kwargs
+
+    def __enter__(self):
+        if isinstance(self._f, six.string_types):
+            self._handle = open(self._f, *self._args, **self._kwargs)
+        else:
+            self._handle = self._f
+        return self._handle
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._handle is not self._f:
+            self._handle.close()
