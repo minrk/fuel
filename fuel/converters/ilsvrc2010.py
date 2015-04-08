@@ -68,7 +68,7 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     with _open_tar_file(valid) as valid_f, _open_tar_file(test) as test_f:
         valid_files, test_files = [[sorted(info.name for info in f
                                            if info.name.endswith('.JPEG'))]
-                                   for f in valid_f, test_f]
+                                   for f in (valid_f, test_f)]
     n_train, n_valid, n_test = [len(fn) for fn in
                                 (train_files, valid_files, test_files)]
     n_total = n_train + n_valid + n_test
