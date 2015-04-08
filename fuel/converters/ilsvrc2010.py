@@ -1,5 +1,6 @@
 from __future__ import division
 
+from contextlib import closing
 import itertools
 import os.path
 import tarfile
@@ -172,10 +173,10 @@ def extract_train_filenames(f, shuffle_seed=None):
     files = []
     with _open_tar_file(f) as tar:
         for class_info_obj in tar:
-            class_fileobj = tar.extract_file(class_info_obj.name)
-            with tarfile.TarFile(fileobj=class_fileobj) as class_tar:
-                files.extend((class_info_obj.name, jpeg_info.name)
-                             for jpeg_info in class_tar)
+            with closing(tar.extractfile(class_info_obj.name)) as fileobj:
+                with tarfile.TarFile(fileobj=fileobj) as class_tar:
+                    files.extend((class_info_obj.name, jpeg_info.name)
+                                 for jpeg_info in class_tar)
     if shuffle_seed is not None:
         files = numpy.array(files)
         rng = numpy.random.RandomState(shuffle_seed)
