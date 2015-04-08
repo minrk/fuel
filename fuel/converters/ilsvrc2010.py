@@ -26,7 +26,21 @@ IMAGE_TARS = TRAIN_IMAGES_TAR, VALID_IMAGES_TAR, TEST_IMAGES_TAR
 
 def ilsvrc2010(directory, save_path, shuffle_train_set=True,
                shuffle_seed=(2015, 4, 1)):
-    """WRITEME
+    """Converter for the ILSVRC2010 dataset.
+
+    Parameters
+    ----------
+    directory : str
+        Path from which to read raw data files.
+    save_path : str
+        Path to save
+    shuffle_train_set : bool, optional
+        If `True` (default), shuffle the training set within the HDF5 file,
+        so that a sequential read through the training set is shuffled
+        by default.
+    shuffle_seed : int or sequence, optional
+        Seed for a `numpy.random.RandomState` used to shuffle the training
+        set order.
 
     """
     # Read what's necessary from the development kit.
@@ -37,7 +51,7 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     wnid_map = dict(zip(synsets['WNID']), xrange(1000))
 
     # Mapping to take ILSVRC2010 (integer) IDs to our internal 0-999 encoding.
-    label_map = dict(zip(synsets['ILSVRC2010_ID']), xrange(1000))
+    label_map = dict(zip(synsets['ILSVRC2010_ID'], xrange(1000)))
     train, valid, test = [os.path.join(directory, fn) for fn in IMAGE_TARS]
 
     # Raw test data groundtruth, ILSVRC2010 IDs.
@@ -58,6 +72,7 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     n_train, n_valid, n_test = [len(fn) for fn in
                                 (train_files, valid_files, test_files)]
     n_total = n_train + n_valid + n_test
+    print("n_total:", n_total)
     width = height = 256  # TODO
     channels = 3
     chunk_size = 512
@@ -80,6 +95,7 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
             images = numpy.vstack(images)
             features[i * chunk_size:(i + 1) * chunk_size] = images
             targets[i * chunk_size:(i + 1) * chunk_size] = labels
+            print (i + 1) * chunk_size
 
 
 def _open_tar_file(f):
@@ -94,7 +110,8 @@ def _open_tar_file(f):
     -------
     TarFile
         A `TarFile` instance.
-     """
+
+    """
     if isinstance(f, six.string_types):
         return tarfile.open(name=f)
     else:
