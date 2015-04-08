@@ -13,7 +13,7 @@ from six.moves import zip, xrange
 from toolz.itertoolz import partition_all
 
 
-DEVKIT_ARCHIVE = 'devkit-1.0.tar.gz'
+DEVKIT_ARCHIVE = 'ILSVRC2010_devkit-1.0.tar.gz'
 DEVKIT_META_PATH = 'data/meta.mat'
 DEVKIT_VALID_GROUNDTRUTH_PATH = 'data/ILSVRC2010_validation_ground_truth.txt'
 PATCH_IMAGES_TAR = 'patch_images.tar'
