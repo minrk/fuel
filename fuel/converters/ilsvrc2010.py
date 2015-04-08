@@ -49,7 +49,7 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     synsets, cost_matrix, raw_valid_groundtruth = read_devkit(devkit_path)
 
     # Mapping to take WordNet IDs to our internal 0-999 encoding.
-    wnid_map = dict(zip(synsets['WNID']), xrange(1000))
+    wnid_map = dict(zip(synsets['WNID'], xrange(1000)))
 
     # Mapping to take ILSVRC2010 (integer) IDs to our internal 0-999 encoding.
     label_map = dict(zip(synsets['ILSVRC2010_ID'], xrange(1000)))
