@@ -77,7 +77,7 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     width = height = 256  # TODO
     channels = 3
     chunk_size = 512
-    with h5py.File(os.path.join(save_path, 'ilsvrc2010.hdf5'), 'wb') as f:
+    with h5py.File(os.path.join(save_path, 'ilsvrc2010.hdf5'), 'w') as f:
         features = f.create_dataset('features', shape=(n_total, channels,
                                                        height, width),
                                     dtype='uint8')
