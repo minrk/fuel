@@ -222,7 +222,7 @@ def train_images_generator(f, filenames, patch_images, wnid_map):
                     inner_tar_handles[inner_tar] = tarfile.open(fileobj=fobj)
                 handle = inner_tar_handles[inner_tar]
                 image = _cropped_transposed_patched(handle, jpeg, patch_images)
-                label = wnid_map[inner_tar[:-4]]
+                label = wnid_map[inner_tar[:-4].encode('ascii')]
                 yield image, label
                 # Super-duper crude resource management.
                 if len(inner_tar_handles) > max_handles:
