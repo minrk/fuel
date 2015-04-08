@@ -405,8 +405,8 @@ def read_metadata(meta_mat):
         new_synsets[attr] = synsets[attr]
     children = [numpy.atleast_1d(ch) for ch in synsets['children']]
     padded_children = [
-        numpy.concatenate(c, -numpy.ones(synsets.shape[0] - len(c),
-                                         dtype=numpy.int16))
+        numpy.concatenate((c, -numpy.ones(synsets.shape[0] - len(c),
+                                          dtype=numpy.int16)))
         for c in children
     ]
     new_synsets['children'] = padded_children
