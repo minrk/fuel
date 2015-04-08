@@ -443,7 +443,11 @@ def extract_patch_images(f):
         for info_obj in tar:
             if not info_obj.name.endswith('.JPEG'):
                 continue
-            _, which_set, _, filename = os.path.split(info_obj.name)
+            # Pretty sure that '/' is used for tarfile regardless of
+            # os.path.sep, but I officially don't care about Windows.
+            tokens = info_obj.name.split('/')
+            which_set = tokens[1]
+            filename = tokens[-1]
             image = imread(tar.extractfile(info_obj.name))
             patch_images[which_set][filename] = image
     return patch_images
