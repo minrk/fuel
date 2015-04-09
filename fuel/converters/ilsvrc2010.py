@@ -2,6 +2,7 @@ from __future__ import division
 
 from contextlib import closing
 import itertools
+import logging
 import os.path
 import tarfile
 
@@ -13,6 +14,8 @@ import six
 from six.moves import zip, xrange
 from toolz.itertoolz import partition_all
 
+
+log = logging.getLogger(__name__)
 
 DEVKIT_ARCHIVE = 'ILSVRC2010_devkit-1.0.tar.gz'
 DEVKIT_META_PATH = 'devkit-1.0/data/meta.mat'
@@ -74,11 +77,15 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     n_train, n_valid, n_test = [len(fn) for fn in
                                 (train_files, valid_files, test_files)]
     n_total = n_train + n_valid + n_test
-    print("n_total:", n_total)
     width = height = 256  # TODO
+    log.info("Training set: {} images".format(n_train))
+    log.info("Validation set: {} images".format(n_valid))
+    log.info("Test set: {} images".format(n_test))
+    log.info("Total (train/valid/test): {} images".format(n_total))
     channels = 3
-    chunk_size = 512
+    chunk_size = 1024
     with h5py.File(os.path.join(save_path, 'ilsvrc2010.hdf5'), 'w') as f:
+        log.info("Creating HDF5 datasets...")
         features = f.create_dataset('features', shape=(n_total, channels,
                                                        height, width),
                                     dtype='uint8')
@@ -92,12 +99,12 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
                                    raw_test_groundtruth, label_map)
         )
         chunk_iterator = partition_all(chunk_size, images_iterator)
+        log.info("Starting processing...")
         for i, chunk in enumerate(chunk_iterator):
             images, labels = zip(*chunk)
             images = numpy.vstack(images)
             features[i * chunk_size:(i + 1) * chunk_size] = images
             targets[i * chunk_size:(i + 1) * chunk_size] = labels
-            print (i + 1) * chunk_size
 
 
 def _open_tar_file(f):
@@ -175,11 +182,15 @@ def extract_train_filenames(f, shuffle_seed=None):
     """
     files = []
     with _open_tar_file(f) as tar:
-        for class_info_obj in tar:
-            with closing(tar.extractfile(class_info_obj.name)) as fileobj:
+        for index, class_info_obj in enumerate(tar):
+            inner_tar_name = class_info_obj.name
+            with closing(tar.extractfile(inner_tar_name)) as fileobj:
                 with tarfile.TarFile(fileobj=fileobj) as class_tar:
-                    files.extend((class_info_obj.name, jpeg_info.name)
+                    files.extend((inner_tar_name, jpeg_info.name)
                                  for jpeg_info in class_tar)
+            log.debug("Extracting filenames from {}".format(inner_tar_name),
+                      extra={'stage': 'Extracting training set filenames',
+                             'completed': index + 1})
     if shuffle_seed is not None:
         files = numpy.array(files)
         rng = numpy.random.RandomState(shuffle_seed)
