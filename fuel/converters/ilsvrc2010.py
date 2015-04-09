@@ -1,6 +1,7 @@
 from __future__ import division
 
 from contextlib import closing
+import io
 import itertools
 import logging
 import os.path
