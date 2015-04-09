@@ -7,7 +7,7 @@ import tarfile
 
 import h5py
 import numpy
-from scipy.misc import imread, imresize
+from PIL import Image
 from scipy.io.matlab import loadmat
 import six
 from six.moves import zip, xrange
@@ -120,6 +120,11 @@ def _open_tar_file(f):
         return tarfile.open(fileobj=f)
 
 
+def _imread(f):
+    with closing(Image.open(f).convert('RGB')) as f:
+        return numpy.array(f)
+
+
 def _cropped_transposed_patched(tar, jpeg_filename, patch_images):
     """Do everything necessary to process a JPEG inside a TAR.
 
@@ -133,8 +138,7 @@ def _cropped_transposed_patched(tar, jpeg_filename, patch_images):
     patch_images : dict
         A dictionary containing filenames (without path) of replacements
         to be substituted in place of the version of the same file found
-        in `tar`. Values are in `(width, height, channels)` layout
-        as returned by `scipy.misc.imread`.
+        in `tar`. Values are in `(width, height, channels)` layout.
 
     Returns
     -------
@@ -145,9 +149,8 @@ def _cropped_transposed_patched(tar, jpeg_filename, patch_images):
     # TODO: make the square_crop configurable from calling functions.
     image = patch_images.get(os.path.basename(jpeg_filename), None)
     if image is None:
-        image = imread(tar.extractfile(jpeg_filename))
-    transposed = image.transpose(2, 0, 1)[numpy.newaxis, ...]
-    return square_crop(transposed)
+        image = _imread(tar.extractfile(jpeg_filename))
+    return square_crop(image).transpose(2, 0, 1)[numpy.newaxis, ...]
 
 
 def extract_train_filenames(f, shuffle_seed=None):
@@ -266,7 +269,7 @@ def other_images_generator(f, patch_images, labels, label_map):
             yield image, label_map[label]
 
 
-def square_crop(image, dim=256, interp='bicubic'):
+def square_crop(image, dim=256):
     """Crop an image to the central square after resizing it.
 
     Parameters
@@ -277,9 +280,6 @@ def square_crop(image, dim=256, interp='bicubic'):
     dim : int, optional
         The length of the shorter side after resizing, and the
         length of both sides after cropping. Default is 256.
-    interp : str, optional
-        The interpolation mode passed to `scipy.misc.imresize`.
-        Defaults to `'bicubic'`.
 
     Returns
     -------
@@ -307,8 +307,11 @@ def square_crop(image, dim=256, interp='bicubic'):
         new_size = dim, int(round(image.shape[1] / image.shape[0] * dim))
         pad = (new_size[1] - dim) // 2
         slices = (slice(None), slice(pad, pad + dim))
-    resized = imresize(image, new_size, interp=interp)
-    return resized[slices]
+    with closing(Image.fromarray(image, mode='RGB')) as pil_image:
+        # PIL uses width x height, e.g. cols x rows, hence new_size backwards.
+        resized = numpy.array(pil_image.resize(new_size[::-1], Image.BICUBIC))
+    out = resized[slices]
+    return out
 
 
 def read_devkit(f):
@@ -448,6 +451,6 @@ def extract_patch_images(f):
             tokens = info_obj.name.split('/')
             which_set = tokens[1]
             filename = tokens[-1]
-            image = imread(tar.extractfile(info_obj.name))
+            image = _imread(tar.extractfile(info_obj.name))
             patch_images[which_set][filename] = image
     return patch_images
