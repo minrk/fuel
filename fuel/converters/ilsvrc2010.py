@@ -3,9 +3,12 @@ from __future__ import division
 from contextlib import closing
 import io
 import itertools
+import multiprocessing
+import os
 import logging
 import os.path
 import tarfile
+import time
 
 import h5py
 import numpy
@@ -14,6 +17,9 @@ from scipy.io.matlab import loadmat
 import six
 from six.moves import zip, xrange
 from toolz.itertoolz import partition_all
+import zmq
+
+from fuel.server import send_arrays, recv_arrays
 
 
 log = logging.getLogger(__name__)
@@ -30,7 +36,7 @@ TEST_IMAGES_TAR = 'ILSVRC2010_images_test.tar'
 IMAGE_TARS = TRAIN_IMAGES_TAR, VALID_IMAGES_TAR, TEST_IMAGES_TAR
 
 
-def ilsvrc2010(directory, save_path, shuffle_train_set=True,
+def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
                shuffle_seed=(2015, 4, 1)):
     """Converter for the ILSVRC2010 dataset.
 
@@ -39,7 +45,10 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     directory : str
         Path from which to read raw data files.
     save_path : str
-        Path to save
+        Path to which to save the HDF5 file.
+    image_dim : int, optional
+        The number of rows and columns to which images are normalized
+        (default 256).
     shuffle_train_set : bool, optional
         If `True` (default), shuffle the training set within the HDF5 file,
         so that a sequential read through the training set is shuffled
@@ -54,58 +63,143 @@ def ilsvrc2010(directory, save_path, shuffle_train_set=True,
     synsets, cost_matrix, raw_valid_groundtruth = read_devkit(devkit_path)
 
     # Mapping to take WordNet IDs to our internal 0-999 encoding.
-    wnid_map = dict(zip(synsets['WNID'], xrange(1000)))
+    wnid_map = dict(zip((s.decode('utf8') for s in synsets['WNID']),
+                        xrange(1000)))
 
     # Mapping to take ILSVRC2010 (integer) IDs to our internal 0-999 encoding.
-    label_map = dict(zip(synsets['ILSVRC2010_ID'], xrange(1000)))
-    train, valid, test = [os.path.join(directory, fn) for fn in IMAGE_TARS]
+    # label_map = dict(zip(synsets['ILSVRC2010_ID'], xrange(1000)))
+    train, valid, test, patch = [os.path.join(directory, fn)
+                                 for fn in IMAGE_TARS + (PATCH_IMAGES_TAR,)]
 
     # Raw test data groundtruth, ILSVRC2010 IDs.
-    raw_test_groundtruth = numpy.loadtxt(
-        os.path.join(directory, TEST_GROUNDTRUTH),
-        dtype=numpy.int16)
-
-    # Read in patch_images.
-    all_patch_images = extract_patch_images(PATCH_IMAGES_TAR)
+    # raw_test_groundtruth = numpy.loadtxt(
+    #     os.path.join(directory, TEST_GROUNDTRUTH),
+    #     dtype=numpy.int16)
 
     # Ascertain the number of filenames to prepare appropriate sized
     # arrays.
-    train_files = extract_train_filenames(train)
-    with _open_tar_file(valid) as valid_f, _open_tar_file(test) as test_f:
-        valid_files, test_files = [[sorted(info.name for info in f
-                                           if info.name.endswith('.JPEG'))]
-                                   for f in (valid_f, test_f)]
-    n_train, n_valid, n_test = [len(fn) for fn in
-                                (train_files, valid_files, test_files)]
+    # train_files = extract_train_filenames(train)
+    print(synsets['num_train_images'].dtype)
+    n_train = int(synsets['num_train_images'].sum())
+    # with _open_tar_file(valid) as valid_f, _open_tar_file(test) as test_f:
+    #     valid_files, test_files = [[sorted(info.name for info in f
+    #                                        if info.name.endswith('.JPEG'))]
+    #                                for f in (valid_f, test_f)]
+    # n_valid, n_test = [len(fn) for fn in
+    #                    (valid_files, test_files)]
+    n_valid, n_test = 0, 0
     n_total = n_train + n_valid + n_test
-    width = height = 256  # TODO
     log.info("Training set: {} images".format(n_train))
     log.info("Validation set: {} images".format(n_valid))
     log.info("Test set: {} images".format(n_test))
     log.info("Total (train/valid/test): {} images".format(n_total))
+    width = height = image_dim
     channels = 3
-    chunk_size = 1024
+    ventilator = multiprocessing.Process(target=train_set_ventilator,
+                                            args=(train,))
+    ventilator.start()
+    workers = [multiprocessing.Process(target=train_set_worker,
+                                        args=(train, patch, wnid_map))
+                for _ in xrange(7)]
+    for worker in workers:
+        worker.start()
     with h5py.File(os.path.join(save_path, 'ilsvrc2010.hdf5'), 'w') as f:
         log.info("Creating HDF5 datasets...")
-        features = f.create_dataset('features', shape=(n_total, channels,
-                                                       height, width),
-                                    dtype='uint8')
-        targets = f.create_dataset('targets', shape=(n_total,), dtype='int16')
-        images_iterator = itertools.chain(
-            train_images_generator(train, train_files,
-                                   all_patch_images['train'], wnid_map),
-            other_images_generator(valid, all_patch_images['val'],
-                                   raw_valid_groundtruth, label_map),
-            other_images_generator(test, all_patch_images['test'],
-                                   raw_test_groundtruth, label_map)
-        )
-        chunk_iterator = partition_all(chunk_size, images_iterator)
-        log.info("Starting processing...")
-        for i, chunk in enumerate(chunk_iterator):
-            images, labels = zip(*chunk)
-            images = numpy.vstack(images)
-            features[i * chunk_size:(i + 1) * chunk_size] = images
-            targets[i * chunk_size:(i + 1) * chunk_size] = labels
+        f.create_dataset('features', shape=(n_total, channels,
+                                            height, width),
+                         dtype='uint8')
+        f.create_dataset('targets', shape=(n_total,), dtype='int16')
+        try:
+            train_set_sink(f, n_total)
+        finally:
+            pass
+        #    for worker in workers:
+        #        worker.terminate()
+        #    ventilator.terminate()
+
+
+def train_set_ventilator(f, ventilator_port=5557, sink_port=5558):
+    print("Ventilator reporting, PID", os.getpid())
+    context = zmq.Context()
+
+    # Socket to send messages on
+    sender = context.socket(zmq.PUSH)
+    sender.bind("tcp://*:{}".format(ventilator_port))
+    sender.hwm = 1  # TODO: make this configurable
+    sink = context.socket(zmq.PUSH)
+    sink.connect("tcp://localhost:{}".format(sink_port))
+    # The first message is "0" and signals start of batch (TODO wat)
+    sink.send(b'0')
+    with _open_tar_file(f) as tar:
+        for num, inner_tar in enumerate(tar):
+            with closing(tar.extractfile(inner_tar.name)) as f:
+                print("Sending #{}".format(num), inner_tar.name)
+                sender.send_pyobj((num, inner_tar.name), zmq.SNDMORE)
+                sender.send(f.read())
+
+
+def train_set_worker(f, patch_images_path, wnid_map, chunk_size=128,
+                     ventilator_port=5557, sink_port=5558):
+    context = zmq.Context()
+    patch_images = extract_patch_images(patch_images_path, 'train')
+    receiver = context.socket(zmq.PULL)
+    receiver.connect("tcp://localhost:{}".format(ventilator_port))
+    receiver.hwm = 1
+    sender = context.socket(zmq.PUSH)
+    sender.connect("tcp://localhost:{}".format(sink_port))
+    sender.hwm = 1
+    while True:
+        num, name = receiver.recv_pyobj()
+        tar_data = io.BytesIO(receiver.recv())
+        with tarfile.open(fileobj=tar_data) as tar:
+            def image_label_gen():
+                for jpeg_info in tar:
+                    image = _cropped_transposed_patched(tar, jpeg_info.name,
+                                                        patch_images)
+                    wnid = jpeg_info.name.split('_')[0]
+                    label = wnid_map[wnid]
+                    yield image, label
+
+            for chunk in partition_all(chunk_size, image_label_gen()):
+                images, labels = list(zip(*chunk))
+                send_arrays(sender, [numpy.concatenate(images),
+                                     numpy.array(labels, dtype=numpy.int16)])
+            print("Finished #{} ({})".format(num, name))
+
+
+class benchmark(object):
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        self.start = time.time()
+
+    def __exit__(self, ty, val, tb):
+        end = time.time()
+        print("%s : %0.3f seconds" % (self.name, end - self.start))
+        return False
+
+
+def train_set_sink(hdf5_file, num_images, shuffle_seed=(2015, 4, 9),
+                   sink_port=5558):
+    print("Sink PID:", os.getpid())
+    context = zmq.Context()
+    receiver = context.socket(zmq.PULL)
+    receiver.bind("tcp://*:5558")
+    receiver.hwm = 1
+    order = numpy.random.RandomState(shuffle_seed).permutation(num_images)
+    order_iter = iter(order)
+    features = hdf5_file['features']
+    targets = hdf5_file['targets']
+    # Synchronize.
+    receiver.recv()
+    while num_images > 0:
+        images, labels = recv_arrays(receiver)
+        assert images.shape[0] == labels.shape[0]
+        indices = sorted(itertools.islice(order_iter, images.shape[0]))
+        features[indices] = images
+        targets[indices] = labels
+        num_images -= images.shape[0]
 
 
 def _open_tar_file(f):
@@ -159,92 +253,6 @@ def _cropped_transposed_patched(tar, jpeg_filename, patch_images):
     if image is None:
         image = _imread(tar.extractfile(jpeg_filename))
     return square_crop(image).transpose(2, 0, 1)[numpy.newaxis, ...]
-
-
-def extract_train_filenames(f, shuffle_seed=None):
-    """Generator that yields a list of files from the training set TAR.
-
-    Parameters
-    ----------
-    f : str or file-like object
-        The filename or file-handle to the training set TAR file.
-    shuffle_seed : int or sequence, optional
-        A seed to be passed to :class:`numpy.random.RandomState`,
-        used to shuffle the order randomly.
-
-    Returns
-    -------
-    files : list of tuples
-        A list of tuples, with each tuple having the form
-        `(class_tar_filename, image_filename)`, where `class_tar_filename`
-        is the inner TAR archive corresponding to a certain class and
-        `image_filename`.
-
-    """
-    files = []
-    with _open_tar_file(f) as tar:
-        for index, class_info_obj in enumerate(tar):
-            inner_tar_name = class_info_obj.name
-            with closing(tar.extractfile(inner_tar_name)) as fileobj:
-                with tarfile.TarFile(fileobj=fileobj) as class_tar:
-                    files.extend((inner_tar_name, jpeg_info.name)
-                                 for jpeg_info in class_tar)
-            log.debug("Extracting filenames from {}".format(inner_tar_name),
-                      extra={'stage': 'Extracting training set filenames',
-                             'completed': index + 1})
-    if shuffle_seed is not None:
-        files = numpy.array(files)
-        rng = numpy.random.RandomState(shuffle_seed)
-        rng.shuffle(files)
-        return files.tolist()
-    else:
-        return files
-
-
-def train_images_generator(f, filenames, patch_images, wnid_map):
-    """Generate a stream of images from the training set TAR.
-
-    Parameters
-    ----------
-    f : str or file-like object
-        The filename or file-handle to the train images TAR file.
-    filenames : list of tuples
-        A list of `(inner_tar_filename, jpeg_filename)` tuples as
-        returned by :func:`extract_train_filenames`.
-    patch_images : dict
-        A dictionary containing filenames (without path) of replacements
-        to be substituted in place of the version of the same file found
-        in `f`.
-    wnid_map : dict
-        A dictionary mapping WordNet IDs (the pre-suffix part of the
-        inner tar filenames) to a numerical index.
-
-    Yields
-    ------
-    tuple
-        A tuple containing an ndarray with shape (1, 3, 256, 256)`,
-        representing an image, and an integer class label.
-
-    """
-    inner_tar_handles = {}
-    max_handles = 50
-
-    with _open_tar_file(f) as f:
-        try:
-            for inner_tar, jpeg in filenames:
-                if inner_tar not in inner_tar_handles:
-                    fobj = f.extractfile(inner_tar)
-                    inner_tar_handles[inner_tar] = tarfile.open(fileobj=fobj)
-                handle = inner_tar_handles[inner_tar]
-                image = _cropped_transposed_patched(handle, jpeg, patch_images)
-                label = wnid_map[inner_tar[:-4].encode('ascii')]
-                yield image, label
-                # Super-duper crude resource management.
-                if len(inner_tar_handles) > max_handles:
-                    inner_tar_handles.pop(next(iter(inner_tar_handles)))
-        finally:
-            for t in inner_tar_handles.values():
-                t.close()
 
 
 def other_images_generator(f, patch_images, labels, label_map):
@@ -430,20 +438,21 @@ def read_metadata(meta_mat):
     return new_synsets, cost_matrix
 
 
-def extract_patch_images(f):
-    """Extracts a dict of dicts of the "patch images" for ILSVRC2010.
+def extract_patch_images(f, which_set=None):
+    """Extracts a dict of the "patch images" for ILSVRC2010.
 
     Parameters
     ----------
     f : str or file-like object
         The filename or file-handle to the patch images TAR file.
+    which_set : str
+        Which set of images to extract. One of 'train', 'val', 'test'.
 
     Returns
     -------
     dict
-        A dict containing three keys: 'train', 'val', 'test'. Each dict
-        contains a mapping of filenames (without path) to a NumPy array
-        containing the replacement image.
+        A dictionary contains a mapping of filenames (without path) to a
+        NumPy array containing the replacement image.
 
     Notes
     -----
@@ -453,7 +462,7 @@ def extract_patch_images(f):
     these. It is this archive that this function is intended to read.
 
     """
-    patch_images = {'train': {}, 'val': {}, 'test': {}}
+    patch_images = {}
     with _open_tar_file(f) as tar:
         for info_obj in tar:
             if not info_obj.name.endswith('.JPEG'):
@@ -461,8 +470,14 @@ def extract_patch_images(f):
             # Pretty sure that '/' is used for tarfile regardless of
             # os.path.sep, but I officially don't care about Windows.
             tokens = info_obj.name.split('/')
-            which_set = tokens[1]
+            file_which_set = tokens[1]
+            if file_which_set != which_set:
+                continue
             filename = tokens[-1]
             image = _imread(tar.extractfile(info_obj.name))
-            patch_images[which_set][filename] = image
+            patch_images[filename] = image
     return patch_images
+
+
+if __name__ == "__main__":
+    ilsvrc2010('.', '.')
