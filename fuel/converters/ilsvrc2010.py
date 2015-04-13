@@ -1,6 +1,7 @@
 from __future__ import division
 
 from contextlib import closing
+from collections import defaultdict
 import io
 import itertools
 import multiprocessing
@@ -8,7 +9,6 @@ import os
 import logging
 import os.path
 import tarfile
-import time
 
 import h5py
 import numpy
@@ -37,7 +37,7 @@ IMAGE_TARS = TRAIN_IMAGES_TAR, VALID_IMAGES_TAR, TEST_IMAGES_TAR
 
 
 def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
-               shuffle_seed=(2015, 4, 1)):
+               shuffle_seed=(2015, 4, 1), num_workers=7):
     """Converter for the ILSVRC2010 dataset.
 
     Parameters
@@ -96,11 +96,12 @@ def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
     width = height = image_dim
     channels = 3
     ventilator = multiprocessing.Process(target=train_set_ventilator,
-                                            args=(train,))
+                                         args=(train,))
     ventilator.start()
     workers = [multiprocessing.Process(target=train_set_worker,
-                                        args=(train, patch, wnid_map))
-                for _ in xrange(7)]
+                                       args=(train, patch, wnid_map,
+                                             synsets['num_train_images']))
+               for _ in xrange(num_workers)]
     for worker in workers:
         worker.start()
     with h5py.File(os.path.join(save_path, 'ilsvrc2010.hdf5'), 'w') as f:
@@ -109,23 +110,50 @@ def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
                                             height, width),
                          dtype='uint8')
         f.create_dataset('targets', shape=(n_total,), dtype='int16')
+        sink = multiprocessing.Process(target=train_set_sink,
+                                       args=(f, n_total,
+                                             synsets['num_train_images']))
+        sink.start()
         try:
-            train_set_sink(f, n_total)
+            log_messages()
+        except KeyboardInterrupt:
+            log.info("Shutting down workers and ventilator...")
         finally:
-            pass
-        #    for worker in workers:
-        #        worker.terminate()
-        #    ventilator.terminate()
+            for worker in workers:
+                worker.terminate()
+            ventilator.terminate()
+            sink.terminate()
+            log.info("Killed child processes.")
 
 
-def train_set_ventilator(f, ventilator_port=5557, sink_port=5558):
-    print("Ventilator reporting, PID", os.getpid())
+def log_messages(logging_port=5559):
     context = zmq.Context()
+    receiver = context.socket(zmq.PULL)
+    receiver.bind("tcp://*:{}".format(logging_port))
+    while True:
+        message = receiver.recv_json()
+        type = message.pop('type')
+        pid = message.pop('pid')
+        status = message.pop('status')
+        log.debug('%10s(%d): %10s %s' % (type, pid, status, str(message)))
 
-    # Socket to send messages on
+
+def train_set_ventilator(f, ventilator_port=5557, sink_port=5558,
+                         logging_port=5559):
+    pid = os.getpid()
+    context = zmq.Context()
+    log_socket = context.socket(zmq.PUSH)
+    log_socket.connect("tcp://localhost:{}".format(logging_port))
+
+    def log(**kwargs):
+        message = {'type': 'VENTILATOR', 'pid': pid}
+        message.update(kwargs)
+        log_socket.send_json(message)
+
+    log(status='START')
     sender = context.socket(zmq.PUSH)
-    sender.bind("tcp://*:{}".format(ventilator_port))
     sender.hwm = 1  # TODO: make this configurable
+    sender.bind("tcp://*:{}".format(ventilator_port))
     sink = context.socket(zmq.PUSH)
     sink.connect("tcp://localhost:{}".format(sink_port))
     # The first message is "0" and signals start of batch (TODO wat)
@@ -133,73 +161,127 @@ def train_set_ventilator(f, ventilator_port=5557, sink_port=5558):
     with _open_tar_file(f) as tar:
         for num, inner_tar in enumerate(tar):
             with closing(tar.extractfile(inner_tar.name)) as f:
-                print("Sending #{}".format(num), inner_tar.name)
                 sender.send_pyobj((num, inner_tar.name), zmq.SNDMORE)
                 sender.send(f.read())
+                log(status='SENT', filename=inner_tar.name, number=num)
+        log(status='FINISHED')
 
 
-def train_set_worker(f, patch_images_path, wnid_map, chunk_size=128,
-                     ventilator_port=5557, sink_port=5558):
+def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
+                     chunk_size=128, ventilator_port=5557, sink_port=5558,
+                     logging_port=5559):
+    pid = os.getpid()
     context = zmq.Context()
+
+    log_socket = context.socket(zmq.PUSH)
+    log_socket.connect("tcp://localhost:{}".format(logging_port))
+
+    def log(**kwargs):
+        message = {'type': 'WORKER', 'pid': pid}
+        message.update(kwargs)
+        log_socket.send_json(message)
+
+    sender = context.socket(zmq.PUSH)
     patch_images = extract_patch_images(patch_images_path, 'train')
     receiver = context.socket(zmq.PULL)
-    receiver.connect("tcp://localhost:{}".format(ventilator_port))
     receiver.hwm = 1
+    receiver.connect("tcp://localhost:{}".format(ventilator_port))
+    log(status='CONNECTED_VENTILATOR', port=ventilator_port)
     sender = context.socket(zmq.PUSH)
-    sender.connect("tcp://localhost:{}".format(sink_port))
     sender.hwm = 1
+    sender.connect("tcp://localhost:{}".format(sink_port))
+    log(status='CONNECTED_SINK', port=sink_port)
     while True:
         num, name = receiver.recv_pyobj()
+        label = wnid_map[name.split('.')[0]]
         tar_data = io.BytesIO(receiver.recv())
+        log(status='RECEIVED', filename=name, number=num, label_id=label)
         with tarfile.open(fileobj=tar_data) as tar:
-            def image_label_gen():
-                for jpeg_info in tar:
-                    image = _cropped_transposed_patched(tar, jpeg_info.name,
-                                                        patch_images)
-                    wnid = jpeg_info.name.split('_')[0]
-                    label = wnid_map[wnid]
-                    yield image, label
-
-            for chunk in partition_all(chunk_size, image_label_gen()):
-                images, labels = list(zip(*chunk))
-                send_arrays(sender, [numpy.concatenate(images),
-                                     numpy.array(labels, dtype=numpy.int16)])
-            print("Finished #{} ({})".format(num, name))
-
-
-class benchmark(object):
-    def __init__(self, name):
-        self.name = name
-
-    def __enter__(self):
-        self.start = time.time()
-
-    def __exit__(self, ty, val, tb):
-        end = time.time()
-        print("%s : %0.3f seconds" % (self.name, end - self.start))
-        return False
+            log(status='OPENED', filename=name)
+            images_gen = (_cropped_transposed_patched(tar, jpeg_info.name,
+                                                      patch_images)
+                          for jpeg_info in tar)
+            total_images = 0
+            for images in partition_all(chunk_size, images_gen):
+                sender.send_pyobj(label, zmq.SNDMORE)
+                send_arrays(sender, [numpy.concatenate(images)])
+                total_images += len(images)
+                log(status='SENT', filename=name, number=num,
+                    num_images=len(images), total_so_far=total_images)
+        if total_images != images_per_class[label]:
+            log(status='NOT_ENOUGH_IMAGES', filename=name, number=num,
+                total_so_far=total_images)
+        log(status='FINISHED', filename=name, number=num, total=total_images)
 
 
-def train_set_sink(hdf5_file, num_images, shuffle_seed=(2015, 4, 9),
-                   sink_port=5558):
-    print("Sink PID:", os.getpid())
-    context = zmq.Context()
-    receiver = context.socket(zmq.PULL)
-    receiver.bind("tcp://*:5558")
-    receiver.hwm = 1
-    order = numpy.random.RandomState(shuffle_seed).permutation(num_images)
+def class_permutations(order, images_per_class):
+    if len(order) != sum(images_per_class):
+        raise ValueError("images_per_class should sum to the length of order")
+    result = []
     order_iter = iter(order)
+    print(images_per_class)
+    for num_images in images_per_class:
+        num_images = int(num_images)
+        result.append(list(itertools.islice(order_iter, num_images)))
+    return result
+
+
+def train_set_sink(hdf5_file, num_images, images_per_class,
+                   flush_frequency=256, shuffle_seed=(2015, 4, 9),
+                   sink_port=5558, logging_port=5559):
+    pid = os.getpid()
+    context = zmq.Context()
+    log_socket = context.socket(zmq.PUSH)
+    log_socket.connect("tcp://localhost:5559")
+
+    def log(**kwargs):
+        message = {'type': 'SINK', 'pid': pid}
+        message.update(kwargs)
+        log_socket.send_json(message)
+
+    receiver = context.socket(zmq.PULL)
+    receiver.hwm = 1
+    receiver.bind("tcp://*:5558")
+    order = numpy.random.RandomState(shuffle_seed).permutation(num_images)
+    orders = list(map(iter, class_permutations(order, images_per_class)))
     features = hdf5_file['features']
     targets = hdf5_file['targets']
     # Synchronize.
     receiver.recv()
-    while num_images > 0:
-        images, labels = recv_arrays(receiver)
-        assert images.shape[0] == labels.shape[0]
-        indices = sorted(itertools.islice(order_iter, images.shape[0]))
+    batches_received = 0
+    images_sum = None
+    images_sq_sum = None
+    num_images_remaining = num_images
+    num_images_by_label = defaultdict(lambda: 0)
+    while num_images_remaining > 0:
+        label = receiver.recv_pyobj()
+        images, = recv_arrays(receiver)
+        batches_received += 1
+        num_images_remaining -= images.shape[0]
+        num_images_by_label[label] += images.shape[0]
+        log(status='RECEIVED', label=label,
+            num_images=images.shape[0], batch_number=batches_received,
+            num_images_remaining=num_images_remaining)
+        if images_sum is None:
+            images_sum = numpy.zeros_like(images[0], dtype=numpy.float64)
+            images_sq_sum = numpy.zeros_like(images[0], dtype=numpy.float64)
+        indices = sorted(itertools.islice(orders[label], images.shape[0]))
         features[indices] = images
-        targets[indices] = labels
-        num_images -= images.shape[0]
+        targets[indices] = label * numpy.ones(images.shape[0],
+                                              dtype=numpy.int16)
+        log(status='WRITTEN', label=label,
+            num_images=images.shape[0], batch_number=batches_received,
+            num_images_remaining=num_images_remaining)
+        images_sum += images.sum(axis=0)
+        images_sq_sum += (images.astype(numpy.uint64) ** 2).sum(axis=0)
+        if batches_received % flush_frequency == 0:
+            log(status='FLUSH', hdf5_filename=hdf5_file.filename,
+                num_images_by_label=num_images_by_label)
+            hdf5_file.flush()
+    features.attrs['training_set_mean'] = mean = images_sum / num_images
+    sq_mean = images_sq_sum / num_images
+    features.attrs['training_set_std'] = numpy.sqrt(sq_mean - mean**2)
+    log.status(status='FINISHED', num_images_by_label=num_images_by_label)
 
 
 def _open_tar_file(f):
@@ -480,4 +562,11 @@ def extract_patch_images(f, which_set=None):
 
 
 if __name__ == "__main__":
+    fh = logging.FileHandler('log.txt')
+    fh.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    log.handlers.clear()
+    log.addHandler(fh)
+    log.setLevel(logging.DEBUG)
     ilsvrc2010('.', '.')
