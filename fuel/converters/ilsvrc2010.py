@@ -19,10 +19,10 @@ from six.moves import zip, xrange
 from toolz.itertoolz import partition_all
 import zmq
 
+# from fuel.datasets import H5PYDataset
 from fuel.server import send_arrays, recv_arrays
-from fuel.utils.logging import ZMQLoggingHandler
-
-
+from fuel.utils.logging import (SubprocessFailure, zmq_log_and_monitor,
+                                configure_zmq_process_logger)
 log = logging.getLogger(__name__)
 
 DEVKIT_ARCHIVE = 'ILSVRC2010_devkit-1.0.tar.gz'
@@ -35,21 +35,6 @@ TRAIN_IMAGES_TAR = 'ILSVRC2010_images_train.tar'
 VALID_IMAGES_TAR = 'ILSVRC2010_images_val.tar'
 TEST_IMAGES_TAR = 'ILSVRC2010_images_test.tar'
 IMAGE_TARS = TRAIN_IMAGES_TAR, VALID_IMAGES_TAR, TEST_IMAGES_TAR
-
-
-class SubprocessFailure(Exception):
-    pass
-
-
-def make_zmq_process_logger(context, name, logging_port):
-    logger = logging.getLogger(__name__)
-    logger.propagate = False
-    socket = context.socket(zmq.PUSH)
-    socket.connect("tcp://localhost:{}".format(logging_port))
-    while logger.handlers:
-        logger.handlers.pop()
-    logger.addHandler(ZMQLoggingHandler(socket))
-    return logger
 
 
 def make_debug_logging_function(logger, process_type, **additional_kwargs):
@@ -178,7 +163,10 @@ def process_train_set(hdf5_file, train_archive_path, patch_archive_path,
                                          train_images_per_class))
     sink.start()
     try:
-        train_set_monitoring(processes=[ventilator, sink] + workers)
+        context = zmq.Context()
+        zmq_log_and_monitor(log, context,
+                            processes=[ventilator, sink] + workers,
+                            failure_threshold=logging.ERROR)
     except KeyboardInterrupt:
         log.info("Keyboard interrupt received.")
     except SubprocessFailure:
@@ -237,22 +225,10 @@ def process_other_set(features, targets, archive, patch_archive, groundtruth,
             yield start
 
 
-def train_set_monitoring(processes=[], logging_port=5559):
-    context = zmq.Context()
-    receiver = context.socket(zmq.PULL)
-    receiver.bind("tcp://*:{}".format(logging_port))
-    logger = logging.getLogger(__name__)
-    while True:
-        message = receiver.recv_pyobj()
-        logger.handle(message)
-        if message.levelno >= logging.ERROR:
-            raise SubprocessFailure
-
-
 def train_set_ventilator(f, ventilator_port=5557, sink_port=5558,
                          logging_port=5559, high_water_mark=10):
     context = zmq.Context()
-    log = make_zmq_process_logger(context, __name__, logging_port)
+    configure_zmq_process_logger(log, context, logging_port)
     debug = make_debug_logging_function(log, 'VENTILATOR')
     debug(status='START')
     sender = context.socket(zmq.PUSH)
@@ -278,7 +254,7 @@ def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
     context = zmq.Context()
 
     # Set up logging.
-    log = make_zmq_process_logger(context, __name__, logging_port)
+    configure_zmq_process_logger(log, context, logging_port)
     debug = make_debug_logging_function(log, 'WORKER')
 
     # Set up ventilator->worker socket on the worker end.
@@ -337,7 +313,7 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
     context = zmq.Context()
 
     # Set up logging.
-    log = make_zmq_process_logger(context, __name__, logging_port)
+    configure_zmq_process_logger(log, context, logging_port)
     debug = make_debug_logging_function(log, 'SINK')
 
     # Create a shuffling order and parcel it up into a list of iterators
