@@ -1,5 +1,6 @@
 import logging
 import zmq
+import traceback
 
 
 class SubprocessFailure(Exception):
@@ -45,8 +46,10 @@ class ZMQLoggingHandler(logging.Handler):
             # and then throw away the traceback object. This seems to
             # allow the text to still be displayed by the default Formatter.
             if record.exc_info:
-                record.exc_text = self.formatter.formatException(
-                    record.exc_info)
+                record.exc_text = (
+                    "Traceback (most recent call last):\n" +
+                    "".join(traceback.format_tb(record.exc_info[2]))
+                )
                 record.exc_info = record.exc_info[:2] + (None,)
             self.socket.send_pyobj(record)
         except (KeyboardInterrupt, SystemExit):
@@ -85,16 +88,25 @@ def zmq_log_and_monitor(logger, context, processes=(), logging_port=5559,
     Notes
     -----
     This function is most useful when run from a process that has
-    launched several worker processes..
+    launched several worker processes. They should each set up a
+    logger with a :class:`ZMQLoggingHandler` (e.g., by using
+    :func:`configure_zmq_process_logger`).
 
     """
     context = zmq.Context()
     receiver = context.socket(zmq.PULL)
     receiver.bind("tcp://*:{}".format(logging_port))
     while len(processes) == 0 or any(p.is_alive() for p in processes):
-        message = receiver.recv_pyobj()
+        try:
+            message = receiver.recv_pyobj(flags=zmq.NOBLOCK)
+        except zmq.ZMQError as exc:
+            if exc.errno == zmq.EAGAIN:
+                continue
+            else:
+                raise
+        levelno = message.levelno
         logger.handle(message)
-        if message.levelno >= logging.ERROR:
+        if levelno >= failure_threshold:
             raise SubprocessFailure
 
 

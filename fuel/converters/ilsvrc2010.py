@@ -1,6 +1,8 @@
 from __future__ import division
 from contextlib import closing
 from collections import defaultdict
+# import errno
+import functools
 import gzip
 import io
 import itertools
@@ -8,7 +10,9 @@ import multiprocessing
 import os
 import logging
 import os.path
+import sys
 import tarfile
+import time
 
 import h5py
 import numpy
@@ -19,7 +23,7 @@ from six.moves import zip, xrange
 from toolz.itertoolz import partition_all
 import zmq
 
-# from fuel.datasets import H5PYDataset
+from fuel.datasets import H5PYDataset
 from fuel.server import send_arrays, recv_arrays
 from fuel.utils.logging import (SubprocessFailure, zmq_log_and_monitor,
                                 configure_zmq_process_logger)
@@ -35,7 +39,23 @@ TRAIN_IMAGES_TAR = 'ILSVRC2010_images_train.tar'
 VALID_IMAGES_TAR = 'ILSVRC2010_images_val.tar'
 TEST_IMAGES_TAR = 'ILSVRC2010_images_test.tar'
 IMAGE_TARS = TRAIN_IMAGES_TAR, VALID_IMAGES_TAR, TEST_IMAGES_TAR
+ALL_FILES = IMAGE_TARS + (TEST_GROUNDTRUTH, DEVKIT_ARCHIVE, PATCH_IMAGES_TAR)
 
+
+# Wrapper for catching interrupted system call. Unsure if we really need
+# this.
+#
+# def uninterruptible(*args, **kwargs):
+#     while True:
+#         try:
+#             return f(*args, **kwargs)
+#         except zmq.ZMQError as e:
+#             if e.errno == errno.EINTR:
+#                 # interrupted, try again
+#                 continue
+#             else:
+#                 # real error, raise it
+#                 raise
 
 def make_debug_logging_function(logger, process_type, **additional_kwargs):
     def _debug(status, **kwargs):
@@ -51,9 +71,14 @@ def make_debug_logging_function(logger, process_type, **additional_kwargs):
     return _debug
 
 
-def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
-               shuffle_seed=(2015, 4, 1), num_workers=4, chunk_size=128):
-    """Converter for the ILSVRC2010 dataset.
+def ilsvrc2010(input_directory, save_path, image_dim=256,
+               shuffle_train_set=True, shuffle_seed=(2015, 4, 1),
+               num_workers=6, worker_batch_size=1024):
+    """Converter for data from the ImageNet Large Scale Visual Recognition
+    Challenge (ILSVRC) 2010 competition.
+
+    Source files for this dataset can be obtained by registering at
+    [ILSVRC2010WEB].
 
     Parameters
     ----------
@@ -73,15 +98,17 @@ def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
         set order.
     num_workers : int, optional
         The number of worker processes to deploy.
-    chunk_size : int, optional
+    worker_batch_size : int, optional
         The number of images the workers should send to the sink at a
         time.
+
+    .. [ILSVRC2010WEB] http://image-net.org/challenges/LSVRC/2010/index
 
     """
     debug = make_debug_logging_function(log, 'MAIN')
 
     # Read what's necessary from the development kit.
-    devkit_path = os.path.join(directory, DEVKIT_ARCHIVE)
+    devkit_path = os.path.join(input_directory, DEVKIT_ARCHIVE)
     synsets, cost_matrix, raw_valid_groundtruth = read_devkit(devkit_path)
 
     # Mapping to take WordNet IDs to our internal 0-999 encoding.
@@ -90,12 +117,12 @@ def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
 
     # Mapping to take ILSVRC2010 (integer) IDs to our internal 0-999 encoding.
     # label_map = dict(zip(synsets['ILSVRC2010_ID'], xrange(1000)))
-    train, valid, test, patch = [os.path.join(directory, fn)
+    train, valid, test, patch = [os.path.join(input_directory, fn)
                                  for fn in IMAGE_TARS + (PATCH_IMAGES_TAR,)]
 
     # Raw test data groundtruth, ILSVRC2010 IDs.
     raw_test_groundtruth = numpy.loadtxt(
-        os.path.join(directory, TEST_GROUNDTRUTH),
+        os.path.join(input_directory, TEST_GROUNDTRUTH),
         dtype=numpy.int16)
 
     # Ascertain the number of filenames to prepare appropriate sized
@@ -111,50 +138,79 @@ def ilsvrc2010(directory, save_path, image_dim=256, shuffle_train_set=True,
     channels = 3
     with h5py.File(os.path.join(save_path, 'ilsvrc2010.hdf5'), 'w') as f:
         log.info("Creating HDF5 datasets...")
+        splits = {'train': (0, n_train),
+                  'valid': (n_train, n_train + n_valid),
+                  'test': (n_train + n_valid, n_total)}
+        f.attrs['splits'] = H5PYDataset.create_split_array({
+            'features': splits,
+            'targets': splits,
+            'filenames': splits
+        })
         f.create_dataset('features', shape=(n_total, channels,
                                             height, width),
-                         dtype='uint8')
-        f.create_dataset('targets', shape=(n_total,), dtype='int16')
-        debug(status='STARTED_SET', which_set='train', num_images='n_train')
+                         dtype=numpy.uint8)
+        f.create_dataset('targets', shape=(n_total,),
+                         dtype=numpy.int16)
+        f.create_dataset('filenames', shape=(n_total,),
+                         dtype='S32')
+        debug(status='STARTED_SET', which_set='train',
+              total_images_in_set=n_train)
         process_train_set(f, train, patch, synsets['num_train_images'],
                           wnid_map, n_train, image_dim, num_workers,
-                          chunk_size)
-        debug(status='FINISHED_SET', which_set='train', num_images='n_train')
+                          worker_batch_size)
+        debug(status='FINISHED_SET', which_set='train')
         ilsvrc_id_to_zero_based = dict(zip(synsets['ILSVRC2010_ID'],
                                        xrange(len(synsets))))
         valid_groundtruth = [ilsvrc_id_to_zero_based[id_]
                              for id_ in raw_valid_groundtruth]
-        debug(status='STARTED_SET', which_set='valid', num_images='n_valid')
-        for num_completed in process_other_set(f['features'], f['targets'],
-                                               valid, patch, valid_groundtruth,
-                                               'valid', chunk_size, image_dim,
-                                               n_train):
+        debug(status='STARTED_SET', which_set='valid',
+              total_images_in_set=n_valid)
+        for num_completed in process_other_set(f, valid, patch,
+                                               valid_groundtruth,
+                                               'valid', worker_batch_size,
+                                               image_dim, n_train):
             debug(status='WRITTEN', which_set='valid',
-                  images_written=num_completed)
+                  num_images_written_so_far=num_completed)
         debug(status='FINISHED_SET', which_set='valid')
         test_groundtruth = [ilsvrc_id_to_zero_based[id_]
                             for id_ in raw_test_groundtruth]
-        debug(status='STARTED_SET', which_set='test', num_images='n_test')
-        for num_completed in process_other_set(f['features'], f['targets'],
-                                               test, patch, test_groundtruth,
-                                               'test', chunk_size, image_dim,
-                                               n_train + n_valid):
+        debug(status='STARTED_SET', which_set='test',
+              total_images_in_set='n_test')
+        for num_completed in process_other_set(f, test, patch,
+                                               test_groundtruth,
+                                               'test', worker_batch_size,
+                                               image_dim, n_train + n_valid):
             debug(status='WRITTEN', which_set='test',
-                  images_written=num_completed)
+                  num_images_written_so_far=num_completed)
         debug(status='FINISHED_SET', which_set='test')
 
 
-def process_train_set(hdf5_file, train_archive_path, patch_archive_path,
+def process_train_set(hdf5_file, train_archive, patch_archive,
                       train_images_per_class, wnid_map, n_train, image_dim,
-                      num_workers, worker_chunk_size):
+                      num_workers, worker_batch_size):
+    """Process the ILSVRC2010 training set.
+
+    Parameters
+    ----------
+    hdf5_file : :class:`h5py.File` instance
+    train_archive :  str or file-like object
+    patch_archive :  str or file-like object
+    train_images_per_class : sequence
+    wnid_map : dict
+    n_train : int
+    image_dim : int
+    num_workers : int
+    worker_batch_size : int
+    """
     ventilator = multiprocessing.Process(target=train_set_ventilator,
-                                         args=(train_archive_path,))
+                                         args=(train_archive,))
     ventilator.start()
     workers = [multiprocessing.Process(target=train_set_worker,
-                                       args=(train_archive_path,
-                                             patch_archive_path, wnid_map,
+                                       args=(train_archive,
+                                             patch_archive, wnid_map,
                                              train_images_per_class,
-                                             image_dim, worker_chunk_size))
+                                             image_dim,
+                                             worker_batch_size))
                for _ in xrange(num_workers)]
     for worker in workers:
         worker.start()
@@ -162,15 +218,20 @@ def process_train_set(hdf5_file, train_archive_path, patch_archive_path,
                                    args=(hdf5_file, n_train,
                                          train_images_per_class))
     sink.start()
+    terminate = False
     try:
         context = zmq.Context()
         zmq_log_and_monitor(log, context,
                             processes=[ventilator, sink] + workers,
                             failure_threshold=logging.ERROR)
     except KeyboardInterrupt:
+        terminate = True
         log.info("Keyboard interrupt received.")
     except SubprocessFailure:
+        terminate = True
         log.info("One or more substituent processes failed.")
+    except Exception:
+        terminate = True
     finally:
         log.info("Shutting down workers and ventilator...")
         for worker in workers:
@@ -178,27 +239,26 @@ def process_train_set(hdf5_file, train_archive_path, patch_archive_path,
         ventilator.terminate()
         sink.terminate()
         log.info("Killed child processes.")
+        if terminate:
+            context.destroy()
+            sys.exit(1)
 
 
-def process_other_set(features, targets, archive, patch_archive, groundtruth,
-                      which_set, chunk_size, image_dim, offset):
+def process_other_set(hdf5_file, archive, patch_archive, groundtruth,
+                      which_set, worker_batch_size, image_dim, offset):
     """Process and convert either the validation set or the test set.
 
     Parameters
     ----------
-    features : array-like
-        The array (or array-like container, such as an HDF5 dataset)
-        to which images should be written.
-    targets : array-like
-        The array (or array-like container, such as an HDF5 dataset)
-        to which targets should be written.
+    hdf5_file : :class:`h5py.File` instance
+        TODO
     archive : str or file-like object
     patch_archive : str or file-like object
     groundtruth : ndarray, 1-dimensional
         Integer targets, with the same length as the number of images
     which_set : str
         One of 'valid' or 'test', used to extract the right patch images.
-    chunk_size : int
+    worker_batch_size : int
         The number of examples/targets to write at a time.
     offset : int
         The offset in the `features` and `targets` arrays at which to
@@ -208,19 +268,26 @@ def process_other_set(features, targets, archive, patch_archive, groundtruth,
     ------
     int
         A stream of integers. Each represents the number of examples
-        processed so far, in increments of `chunk_size`.
+        processed so far, in increments of `worker_batch_size`.
     """
+    features = hdf5_file['features']
+    targets = hdf5_file['targets']
+    filenames = hdf5_file['filenames']
     patch_images = extract_patch_images(patch_archive, which_set)
     with _open_tar_file(archive) as tar:
         images_gen = (_cropped_transposed_patched(tar, filename,
                                                   patch_images, image_dim)
                       for filename in sorted(info.name for info in tar))
         start = offset
-        for chunk in partition_all(zip(images_gen, groundtruth), chunk_size):
-            images, labels = zip(*chunk)
+        partitioner = functools.partial(partition_all, worker_batch_size)
+        combined = zip(*[partitioner(s) for s in [images_gen, groundtruth,
+                                                  sorted(info.name
+                                                         for info in tar)]])
+        for images, labels, files in combined:
             this_chunk = len(images)
             features[start:start + this_chunk] = numpy.concatenate(images)
             targets[start:start + this_chunk] = labels
+            filenames[start:start + this_chunk] = files
             start += this_chunk
             yield start
 
@@ -241,19 +308,21 @@ def train_set_ventilator(f, ventilator_port=5557, sink_port=5558,
     with _open_tar_file(f) as tar:
         for num, inner_tar in enumerate(tar):
             with closing(tar.extractfile(inner_tar.name)) as f:
+                debug(status='SENDING_TAR', tar_filename=inner_tar.name,
+                      number=num)
                 sender.send_pyobj((num, inner_tar.name), zmq.SNDMORE)
                 sender.send(f.read())
-                debug(status='SENT', tar_filename=inner_tar.name, number=num)
-        debug(status='SHUTDOWN')
+                debug(status='SENT_TAR', tar_filename=inner_tar.name,
+                      number=num)
+    while True:
+        time.sleep(10000)
 
 
 def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
-                     image_dim=256, chunk_size=128, ventilator_port=5557,
-                     sink_port=5558, logging_port=5559,
+                     image_dim=256, worker_batch_size=128,
+                     ventilator_port=5557, sink_port=5558, logging_port=5559,
                      receiver_high_water_mark=10, sender_high_water_mark=10):
     context = zmq.Context()
-
-    # Set up logging.
     configure_zmq_process_logger(log, context, logging_port)
     debug = make_debug_logging_function(log, 'WORKER')
 
@@ -269,42 +338,52 @@ def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
     sender.connect("tcp://localhost:{}".format(sink_port))
     debug(status='CONNECTED_SINK', port=sink_port)
 
-    # Grab patch images off disk.
     patch_images = extract_patch_images(patch_images_path, 'train')
 
     while True:
-        # Receive a class TAR file.
+        debug(status='RECEIVING_TAR')
         num, name = receiver.recv_pyobj()
         label = wnid_map[name.split('.')[0]]
         tar_data = io.BytesIO(receiver.recv())
-        debug(status='RECEIVED', tar_filename=name, number=num, label_id=label)
+        debug(status='RECEIVED_TAR', tar_filename=name, number=num,
+              label_id=label)
 
         with tarfile.open(fileobj=tar_data) as tar:
-            debug(status='OPENED', tar_filename=name)
+            debug(status='OPENED', tar_filename=name, number=num)
             images_gen = (_cropped_transposed_patched(tar, jpeg_info.name,
                                                       patch_images, image_dim)
                           for jpeg_info in tar)
+            fname_gen = (os.path.basename(jpeg_info.name).encode('ascii')
+                         for jpeg_info in tar.getmembers())
             total_images = 0
-            # Send images to sink in batches of at most chunk_size.
+            # Send images to sink in batches of at most worker_batch_size.
             try:
-                for images in partition_all(chunk_size, images_gen):
+                comb_gen = zip(partition_all(worker_batch_size, images_gen),
+                               partition_all(worker_batch_size, fname_gen))
+                for images, files in comb_gen:
+                    debug(status='SENDING_BATCH', tar_filename=name,
+                          number=num, num_images=len(images),
+                          total_so_far=total_images, label=label)
                     sender.send_pyobj(label, zmq.SNDMORE)
-                    send_arrays(sender, [numpy.concatenate(images)])
+                    send_arrays(sender,
+                                [numpy.concatenate(images),
+                                 numpy.array(files, dtype='S32')])
                     total_images += len(images)
-                    debug(status='SENT', tar_filename=name, number=num,
-                          num_images=len(images), total_so_far=total_images)
+                    debug(status='SENT_BATCH', tar_filename=name, number=num,
+                          num_images=len(images), total_so_far=total_images,
+                          label=label)
             except Exception:
                 log.error("WORKER(%d): Encountered error processing "
                           "%s (%d images processed successfully)",
                           os.getpid(), name, total_images,
                           exc_info=1)
-
         if total_images != images_per_class[label]:
             log.error("WORKER(%d): For class %s (%d), expected %d images but "
                       "only found %d", os.getpid(), name.split('.')[0], label,
-                      images_per_class[label], total_images, exc_info=1)
-        debug(status='FINISHED_CLASS', tar_filename=name, number=num,
-              total=total_images)
+                      images_per_class[label], total_images)
+        debug(status='FINISHED_TAR', tar_filename=name, number=num,
+              total=total_images, label=label)
+    debug(status='SHUTDOWN')
 
 
 def train_set_sink(hdf5_file, num_images, images_per_class,
@@ -319,7 +398,7 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
     # Create a shuffling order and parcel it up into a list of iterators
     # over class-sized sublists of the list.
     all_order = numpy.random.RandomState(shuffle_seed).permutation(num_images)
-    orders = list(map(iter, class_permutations(all_order, images_per_class)))
+    orders = list(map(iter, permutation_by_class(all_order, images_per_class)))
 
     # Receive completed batches from the workers.
     receiver = context.socket(zmq.PULL)
@@ -331,21 +410,21 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
     batches_received = 0
     images_sum = None
     images_sq_sum = None
-    num_images_remaining = num_images
+    num_images_written = 0
     num_images_by_label = defaultdict(lambda: 0)
 
     features = hdf5_file['features']
     targets = hdf5_file['targets']
+    filenames = hdf5_file['filenames']
     try:
-        while num_images_remaining > 0:
+        while num_images_written < num_images:
             # Receive a label and a batch of images.
+            debug(status='RECEIVING_BATCH')
             label = receiver.recv_pyobj()
-            images, = recv_arrays(receiver)
+            images, files = recv_arrays(receiver)
             batches_received += 1
-
-            debug(status='RECEIVED', label=label,
-                  num_images=images.shape[0], batch_number=batches_received,
-                  num_images_remaining=num_images_remaining)
+            debug(status='RECEIVED_BATCH', label=label,
+                  num_images=images.shape[0], batch=batches_received)
 
             # Delay creation of the sum arrays until we've got the first
             # batch so that we can size them correctly.
@@ -362,13 +441,14 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
             features[indices] = images
             targets[indices] = label * numpy.ones(images.shape[0],
                                                   dtype=numpy.int16)
+            filenames[indices] = files
 
-            num_images_remaining -= images.shape[0]
+            num_images_written += images.shape[0]
             num_images_by_label[label] += images.shape[0]
 
             debug(status='WRITTEN', label=label,
-                  num_images=images.shape[0], batch_number=batches_received,
-                  num_images_remaining=num_images_remaining)
+                  num_images=images.shape[0], batch=batches_received,
+                  num_images_written_so_far=num_images_written)
 
             # Accumulate the sum and the sum of the square, for mean and
             # variance statistics.
@@ -381,14 +461,25 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
                 debug(status='FLUSH', hdf5_filename=hdf5_file.filename)
                 hdf5_file.flush()
     except Exception:
-        log.error("SINK(%d): encountered exception (%d images remaining)",
-                  os.getpid(), num_images_remaining, exc_info=1)
+        log.error("SINK(%d): encountered exception (%d images written)",
+                  os.getpid(), num_images_written, exc_info=1)
         return
 
     # Compute training set mean and variance.
-    features.attrs['training_set_mean'] = mean = images_sum / num_images
-    sq_mean = images_sq_sum / num_images
-    features.attrs['training_set_std'] = numpy.sqrt(sq_mean - mean**2)
+    train_mean = images_sum / num_images
+    train_std = numpy.sqrt(images_sq_sum / num_images - train_mean**2)
+    hdf5_file.create_dataset('features_train_mean', shape=train_mean.shape,
+                             dtype=train_mean.dtype)
+    hdf5_file.create_dataset('features_train_std', shape=train_std.shape,
+                             dtype=train_std.dtype)
+    hdf5_file['features_train_mean'] = train_mean
+    hdf5_file['features_train_std'] = train_std
+    # hdf5_file['features'].dims.create_scale(hdf5_file['features_train_mean'],
+    #                                         'train_mean')
+    # hdf5_file['features'].dims.create_scale(hdf5_file['features_train_std'],
+    #                                         'train_std')
+    # hdf5_file['features'].dims[0].attach_scale(hdf5_file['features_train_mean'])
+    # hdf5_file['features'].dims[0].attach_scale(hdf5_file['features_train_mean'])
     debug(status='DONE')
 
 
@@ -413,7 +504,7 @@ def _open_tar_file(f):
 
 
 def _imread(f):
-    """Simple image reading function.
+    """Read an image with PIL, convert to RGB if necessary.
 
     Parameters
     ----------
@@ -426,8 +517,8 @@ def _imread(f):
         RGB image data as a NumPy array with shape `(rows, cols, 3)`.
 
     """
-    with closing(Image.open(f).convert('RGB')) as f:
-        return numpy.array(f)
+    with closing(Image.open(f)) as f:
+        return numpy.array(f.convert('RGB'))
 
 
 def _cropped_transposed_patched(tar, jpeg_filename, patch_images, image_dim):
@@ -466,42 +557,9 @@ def _cropped_transposed_patched(tar, jpeg_filename, patch_images, image_dim):
     return square_crop(image, dim=image_dim).transpose(2, 0, 1)[numpy.newaxis]
 
 
-def other_images_generator(f, patch_images, labels, label_map):
-    """Generate a stream of images from the valid or test set TAR.
+def permutation_by_class(order, images_per_class):
+    """Take a permutation on the integers and divide it into chunks.
 
-
-    Parameters
-    ----------
-    f : str or file-like object
-        The filename or file-handle to the images TAR file.
-    patch_images : dict
-        A dictionary containing filenames (without path) of replacements
-        to be substituted in place of the version of the same file found
-        in `f`.
-    labels : sequence
-        A list of integer labels.
-    label_map : dict
-        Dictionary mapping the integers in `labels` to other integers
-        (i.e. from 0-999).
-
-    Yields
-    ------
-    tuple
-        The first element is which is an image represented as an ndarray
-        of shape `(1, 256, 256, 3)`, the second element of which is an
-        integer label between 0 and 999 inclusive.
-
-    """
-    with _open_tar_file(f) as tar:
-        filenames = sorted(info.name for info in f
-                           if info.name.endswith('.JPEG'))
-        for fn, label in zip(filenames, labels):
-            image = _cropped_transposed_patched(tar, fn, patch_images)
-            yield image, label_map[label]
-
-
-def class_permutations(order, images_per_class):
-    """
     Parameters
     ----------
     order : sequence
@@ -514,7 +572,11 @@ def class_permutations(order, images_per_class):
     Returns
     -------
     list of lists
-        A list the same length as `images_per_class`, except
+        Each element of the returned list contains a number of
+        elements corresponding to the same position in `images_per_class`;
+        the elements of the inner lists are drawn sequentially from
+        `order`.
+
     """
     if len(order) != sum(images_per_class):
         raise ValueError("images_per_class should sum to the length of order")
@@ -602,7 +664,7 @@ def read_devkit(f):
 
 
 def read_metadata(meta_mat):
-    """Read ILSVRC2010 metadata.
+    """Read ILSVRC2010 metadata from the distributed MAT file.
 
     Parameters
     ----------
@@ -717,6 +779,35 @@ def extract_patch_images(f, which_set=None):
     return patch_images
 
 
+import progressbar
+
+
+class ProgressBarHandler(logging.Handler):
+    def __init__(self, max_val_attr, curr_val_attr, widgets=None,
+                 start_predicate=None, update_predicate=None,
+                 level=logging.DEBUG):
+        super(ProgressBarHandler, self).__init__(level)
+        self.max_val_attr = max_val_attr
+        self.curr_val_attr = curr_val_attr
+        self.widgets = widgets
+        self.start_predicate = (start_predicate if start_predicate is not None
+                                else lambda x: hasattr(x, self.max_val_attr))
+        self.update_predicate = (update_predicate
+                                 if update_predicate is not None
+                                 else lambda x: hasattr(x, self.curr_val_attr))
+        self.level = level
+
+    def handle(self, record):
+        if self.start_predicate(record):
+            maxval = getattr(record, self.max_val_attr)
+            self.progress_bar = progressbar.ProgressBar(
+                maxval=maxval,
+                widgets=self.widgets).start()
+        elif self.update_predicate(record):
+            currval = getattr(record, self.curr_val_attr)
+            self.progress_bar.update(currval)
+
+
 if __name__ == "__main__":
     formatter = logging.Formatter('%(asctime)s %(message)s')
     fh = logging.FileHandler('log.txt')
@@ -729,4 +820,7 @@ if __name__ == "__main__":
         log.root.handlers.pop()
     sh = logging.StreamHandler()
     sh.setLevel(logging.INFO)
+    log.addHandler(sh)
+    log.addHandler(ProgressBarHandler('total_images_in_set',
+                                      'num_images_written_so_far'))
     ilsvrc2010('.', '.')
