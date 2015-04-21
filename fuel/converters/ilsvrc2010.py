@@ -152,10 +152,10 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
     n_train = int(synsets['num_train_images'].sum())
     n_valid, n_test = len(raw_valid_groundtruth), len(raw_test_groundtruth)
     n_total = n_train + n_valid + n_test
-    log.info("Training set: {} images".format(n_train))
-    log.info("Validation set: {} images".format(n_valid))
-    log.info("Test set: {} images".format(n_test))
-    log.info("Total (train/valid/test): {} images".format(n_total))
+    log.info('Training set: {} images'.format(n_train))
+    log.info('Validation set: {} images'.format(n_valid))
+    log.info('Test set: {} images'.format(n_test))
+    log.info('Total (train/valid/test): {} images'.format(n_total))
     width = height = image_dim
     channels = 3
     with h5py.File(os.path.join(save_path, output_filename), 'w-') as f:
@@ -175,6 +175,7 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
                          dtype=numpy.int16)
         f.create_dataset('filenames', shape=(n_total,),
                          dtype='S32')
+        log.info('Processing training set...')
         debug(status='STARTED_SET', which_set='train',
               total_images_in_set=n_train)
         process_train_set(f, train, patch, synsets['num_train_images'],
@@ -185,6 +186,7 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
                                        xrange(len(synsets))))
         valid_groundtruth = [ilsvrc_id_to_zero_based[id_]
                              for id_ in raw_valid_groundtruth]
+        log.info('Processing validation set...')
         debug(status='STARTED_SET', which_set='valid',
               total_images_in_set=n_valid)
         for num_completed in process_other_set(f, valid, patch,
@@ -196,6 +198,7 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
         debug(status='FINISHED_SET', which_set='valid')
         test_groundtruth = [ilsvrc_id_to_zero_based[id_]
                             for id_ in raw_test_groundtruth]
+        log.info('Processing test set...')
         debug(status='STARTED_SET', which_set='test',
               total_images_in_set='n_test')
         for num_completed in process_other_set(f, test, patch,
@@ -248,19 +251,19 @@ def process_train_set(hdf5_file, train_archive, patch_archive,
                             failure_threshold=logging.ERROR)
     except KeyboardInterrupt:
         terminate = True
-        log.info("Keyboard interrupt received.")
+        log.info('Keyboard interrupt received.')
     except SubprocessFailure:
         terminate = True
-        log.info("One or more substituent processes failed.")
+        log.info('One or more substituent processes failed.')
     except Exception:
         terminate = True
     finally:
-        log.info("Shutting down workers and ventilator...")
+        log.info('Shutting down workers and ventilator...')
         for worker in workers:
             worker.terminate()
         ventilator.terminate()
         sink.terminate()
-        log.info("Killed child processes.")
+        log.info('Killed child processes.')
         if terminate:
             context.destroy()
             sys.exit(1)
@@ -351,13 +354,13 @@ def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
     # Set up ventilator->worker socket on the worker end.
     receiver = context.socket(zmq.PULL)
     receiver.hwm = receiver_high_water_mark
-    receiver.connect("tcp://localhost:{}".format(ventilator_port))
+    receiver.connect('tcp://localhost:{}'.format(ventilator_port))
     debug(status='CONNECTED_VENTILATOR', port=ventilator_port)
 
     # Set up worker->sink socket on the worker end.
     sender = context.socket(zmq.PUSH)
     sender.hwm = sender_high_water_mark
-    sender.connect("tcp://localhost:{}".format(sink_port))
+    sender.connect('tcp://localhost:{}'.format(sink_port))
     debug(status='CONNECTED_SINK', port=sink_port)
 
     patch_images = extract_patch_images(patch_images_path, 'train')
@@ -395,13 +398,13 @@ def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
                           num_images=len(images), total_so_far=total_images,
                           label=label)
             except Exception:
-                log.error("WORKER(%d): Encountered error processing "
-                          "%s (%d images processed successfully)",
+                log.error('WORKER(%d): Encountered error processing '
+                          '%s (%d images processed successfully)',
                           os.getpid(), name, total_images,
                           exc_info=1)
         if total_images != images_per_class[label]:
-            log.error("WORKER(%d): For class %s (%d), expected %d images but "
-                      "only found %d", os.getpid(), name.split('.')[0], label,
+            log.error('WORKER(%d): For class %s (%d), expected %d images but '
+                      'only found %d', os.getpid(), name.split('.')[0], label,
                       images_per_class[label], total_images)
         debug(status='FINISHED_TAR', tar_filename=name, number=num,
               total=total_images, label=label)
@@ -425,7 +428,7 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
     # Receive completed batches from the workers.
     receiver = context.socket(zmq.PULL)
     receiver.hwm = 10
-    receiver.bind("tcp://*:5558")
+    receiver.bind('tcp://*:5558')
 
     # Synchronize with the ventilator.
     receiver.recv()
@@ -483,7 +486,7 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
                 debug(status='FLUSH', hdf5_filename=hdf5_file.filename)
                 hdf5_file.flush()
     except Exception:
-        log.error("SINK(%d): encountered exception (%d images written)",
+        log.error('SINK(%d): encountered exception (%d images written)',
                   os.getpid(), num_images_written, exc_info=1)
         return
 
@@ -782,7 +785,7 @@ def extract_patch_images(f, which_set=None):
 
     """
     if which_set not in ('train', 'valid', 'test'):
-        raise ValueError("which_set must be one of train, valid, or test")
+        raise ValueError('which_set must be one of train, valid, or test')
     which_set = 'val' if which_set == 'valid' else which_set
     patch_images = {}
     with _open_tar_file(f) as tar:
