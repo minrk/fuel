@@ -70,7 +70,7 @@ def zmq_log_and_monitor(logger, context, processes=(), logging_port=5559,
     processes : sequence, optional
         Collection containing :class:`multiprocessing.Process` objects.
         The loop will continue until none of these processes is alive.
-        If empty (default), this
+        If empty (default), this loops forever until interrupted.
     logging_port : int, optional
         The port on which to initiate a ZeroMQ PULL socket and receive
         :class:`logging.LogRecord` messages.
