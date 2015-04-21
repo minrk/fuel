@@ -131,7 +131,6 @@ def configure_zmq_process_logger(logger, context, logging_port):
     connected on `logging_port`.
 
     """
-    logger = logging.getLogger(__name__)
     logger.propagate = False
     socket = context.socket(zmq.PUSH)
     socket.connect("tcp://localhost:{}".format(logging_port))
