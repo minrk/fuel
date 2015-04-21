@@ -12,7 +12,6 @@ import logging
 import os.path
 import sys
 import tarfile
-import time
 
 import h5py
 import numpy
@@ -57,16 +56,40 @@ ALL_FILES = IMAGE_TARS + (TEST_GROUNDTRUTH, DEVKIT_ARCHIVE, PATCH_IMAGES_TAR)
 #                 # real error, raise it
 #                 raise
 
-def make_debug_logging_function(logger, process_type, **additional_kwargs):
+def make_debug_logging_function(logger, process_type, **additional_attrs):
+    """Return a callable for logging keyword argument-based debug messages.
+
+    Parameters
+    ----------
+    logger : object
+        Logger-like object with a `debug()` method matching the
+        signature of the same method from :class:`logging.Logger`.
+    process_type : str
+        A string that will be included at the beginning of each message,
+        along with the PID in parentheses.
+    \*\*additional_attrs
+        Other attributes that should appear on every `LogRecord` emitted
+        by the returned function (but not in the message).
+
+    Returns
+    -------
+    debug_log_fn : callable
+        A function that expects one mandatory argument `status`, and
+        as many keyword arguments as desired. The keywords and their
+        values will appear in the log message as *key=value* (sorted
+        by key), and will also be available as attributes on the
+        corresponding `LogRecord` object.
+
+    """
     def _debug(status, **kwargs):
         pid = os.getpid()
-        message_str = "{process_type}({pid}): {status} ".format(
+        message_str = '{process_type}({pid}): {status} '.format(
             process_type=process_type, pid=pid, status=status)
-        message_str += " ".join("{key}={val}".format(key=key, val=val)
-                                for key, val in kwargs.items())
+        message_str += ' '.join('{key}={val}'.format(key=key, val=kwargs[key])
+                                for key in sorted(kwargs))
         kwargs['process_type'] = process_type
         kwargs['status'] = status
-        kwargs.update(additional_kwargs)
+        kwargs.update(additional_attrs)
         logger.debug(message_str, extra=kwargs)
     return _debug
 
