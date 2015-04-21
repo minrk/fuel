@@ -96,7 +96,8 @@ def make_debug_logging_function(logger, process_type, **additional_attrs):
 
 def ilsvrc2010(input_directory, save_path, image_dim=256,
                shuffle_train_set=True, shuffle_seed=(2015, 4, 1),
-               num_workers=6, worker_batch_size=1024):
+               num_workers=6, worker_batch_size=1024,
+               output_filename='ilsvrc2010.hdf5'):
     """Converter for data from the ImageNet Large Scale Visual Recognition
     Challenge (ILSVRC) 2010 competition.
 
@@ -157,8 +158,8 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
     log.info("Total (train/valid/test): {} images".format(n_total))
     width = height = image_dim
     channels = 3
-    with h5py.File(os.path.join(save_path, 'ilsvrc2010.hdf5'), 'w') as f:
-        log.info("Creating HDF5 datasets...")
+    with h5py.File(os.path.join(save_path, output_filename), 'w-') as f:
+        log.info('Creating HDF5 datasets...')
         splits = {'train': (0, n_train),
                   'valid': (n_train, n_train + n_valid),
                   'test': (n_train + n_valid, n_total)}
