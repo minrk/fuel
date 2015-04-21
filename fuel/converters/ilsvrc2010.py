@@ -115,8 +115,6 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
     wnid_map = dict(zip((s.decode('utf8') for s in synsets['WNID']),
                         xrange(1000)))
 
-    # Mapping to take ILSVRC2010 (integer) IDs to our internal 0-999 encoding.
-    # label_map = dict(zip(synsets['ILSVRC2010_ID'], xrange(1000)))
     train, valid, test, patch = [os.path.join(input_directory, fn)
                                  for fn in IMAGE_TARS + (PATCH_IMAGES_TAR,)]
 
