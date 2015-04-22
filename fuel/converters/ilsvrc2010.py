@@ -200,7 +200,7 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
                             for id_ in raw_test_groundtruth]
         log.info('Processing test set...')
         debug(status='STARTED_SET', which_set='test',
-              total_images_in_set='n_test')
+              total_images_in_set=n_test)
         for num_completed in process_other_set(f, test, patch,
                                                test_groundtruth,
                                                'test', worker_batch_size,
