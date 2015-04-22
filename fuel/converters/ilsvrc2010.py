@@ -246,8 +246,10 @@ def process_train_set(hdf5_file, train_archive, patch_archive,
     terminate = False
     try:
         context = zmq.Context()
+        # Only monitor the ventilator/sink for aliveness. Workers should only
+        # terminate when there's an error.
         zmq_log_and_monitor(log, context,
-                            processes=[ventilator, sink] + workers,
+                            processes=[ventilator, sink],
                             failure_threshold=logging.ERROR)
     except KeyboardInterrupt:
         terminate = True
@@ -300,47 +302,53 @@ def process_other_set(hdf5_file, archive, patch_archive, groundtruth,
     filenames = hdf5_file['filenames']
     patch_images = extract_patch_images(patch_archive, which_set)
     with _open_tar_file(archive) as tar:
+        jpeg_files = sorted(info.name for info in tar
+                            if info.name.endswith('.JPEG'))
         images_gen = (_cropped_transposed_patched(tar, filename,
                                                   patch_images, image_dim)
-                      for filename in sorted(info.name for info in tar))
+                      for filename in jpeg_files)
         start = offset
         partitioner = functools.partial(partition_all, worker_batch_size)
         combined = zip(*[partitioner(s) for s in [images_gen, groundtruth,
-                                                  sorted(info.name
-                                                         for info in tar)]])
+                                                  jpeg_files]])
         for images, labels, files in combined:
             this_chunk = len(images)
             features[start:start + this_chunk] = numpy.concatenate(images)
             targets[start:start + this_chunk] = labels
-            filenames[start:start + this_chunk] = files
+            filenames[start:start + this_chunk] = [f.encode('ascii')
+                                                   for f in files]
             start += this_chunk
-            yield start
+            yield start - offset
 
 
 def train_set_ventilator(f, ventilator_port=5557, sink_port=5558,
                          logging_port=5559, high_water_mark=10):
-    context = zmq.Context()
-    configure_zmq_process_logger(log, context, logging_port)
-    debug = make_debug_logging_function(log, 'VENTILATOR')
-    debug(status='START')
-    sender = context.socket(zmq.PUSH)
-    sender.hwm = high_water_mark
-    sender.bind("tcp://*:{}".format(ventilator_port))
-    sink = context.socket(zmq.PUSH)
-    sink.connect("tcp://localhost:{}".format(sink_port))
-    # Signal the sink to start receiving. Required, according to ZMQ guide.
-    sink.send(b'0')
-    with _open_tar_file(f) as tar:
-        for num, inner_tar in enumerate(tar):
-            with closing(tar.extractfile(inner_tar.name)) as f:
-                debug(status='SENDING_TAR', tar_filename=inner_tar.name,
-                      number=num)
-                sender.send_pyobj((num, inner_tar.name), zmq.SNDMORE)
-                sender.send(f.read())
-                debug(status='SENT_TAR', tar_filename=inner_tar.name,
-                      number=num)
-    while True:
-        time.sleep(10000)
+    try:
+        context = zmq.Context()
+        configure_zmq_process_logger(log, context, logging_port)
+        debug = make_debug_logging_function(log, 'VENTILATOR')
+        debug(status='START')
+        sender = context.socket(zmq.PUSH)
+        sender.hwm = high_water_mark
+        sender.bind('tcp://*:{}'.format(ventilator_port))
+        sink = context.socket(zmq.PUSH)
+        sink.connect('tcp://localhost:{}'.format(sink_port))
+        # Signal the sink to start receiving. Required, according to ZMQ guide.
+        sink.send(b'0')
+        with _open_tar_file(f) as tar:
+            for num, inner_tar in enumerate(tar):
+                with closing(tar.extractfile(inner_tar.name)) as f:
+                    debug(status='SENDING_TAR', tar_filename=inner_tar.name,
+                          number=num)
+                    sender.send_pyobj((num, inner_tar.name), zmq.SNDMORE)
+                    sender.send(f.read())
+                    debug(status='SENT_TAR', tar_filename=inner_tar.name,
+                          number=num)
+        log.debug('SHUTDOWN')
+    finally:
+        # Manually destroy the context so as to flush buffers. This avoids
+        # an interpreter garbage collection bug on Python >= 3.4.
+        context.destroy()
 
 
 def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
