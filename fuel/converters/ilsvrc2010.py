@@ -106,7 +106,7 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
 
     Parameters
     ----------
-    directory : str
+    input_directory : str
         Path from which to read raw data files.
     save_path : str
         Path to which to save the HDF5 file.
