@@ -218,13 +218,28 @@ def process_train_set(hdf5_file, train_archive, patch_archive,
     Parameters
     ----------
     hdf5_file : :class:`h5py.File` instance
+        HDF5 file handle to which to write. Assumes `features`, `targets`
+        and `filenames` already exist and have first dimension larger than
+        `sum(images_per_class)`.
     train_archive :  str or file-like object
+        Filename or file handle for the TAR archive of training images.
     patch_archive :  str or file-like object
+        Filename or file handle for the TAR archive of patch images.
     train_images_per_class : sequence
+        A list of integers, where each element is the number of training
+        set images for the corresponding class index.
     wnid_map : dict
+        A dictionary mapping WordNet IDs to class indices.
     image_dim : int
+        The width and height of the desired images after resizing and
+        central cropping.
     num_workers : int
+        The number of worker processes to spawn, in addition to a
+        source and sink process.
     worker_batch_size : int
+        The number of images each worker should send over the socket
+        to the sink at a time.
+
     """
     n_train = sum(train_images_per_class)
     ventilator = multiprocessing.Process(target=train_set_ventilator,
@@ -278,7 +293,9 @@ def process_other_set(hdf5_file, archive, patch_archive, groundtruth,
     Parameters
     ----------
     hdf5_file : :class:`h5py.File` instance
-        TODO
+        HDF5 file handle to which to write. Assumes `features`, `targets`
+        and `filenames` already exist and are at least as long as
+        `offset` plus the number of files in `archive`.
     archive : str or file-like object
     patch_archive : str or file-like object
     groundtruth : ndarray, 1-dimensional
@@ -422,6 +439,35 @@ def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
 def train_set_sink(hdf5_file, num_images, images_per_class,
                    flush_frequency=256, shuffle_seed=(2015, 4, 9),
                    sink_port=5558, logging_port=5559, high_water_mark=10):
+    """Write batches of data incoming from workers into an HDF5 file.
+
+    Parameters
+    ----------
+    hdf5_file : :class:`h5py.File` instance
+        HDF5 file handle to which to write. Assumes `features`, `targets`
+        and `filenames` already exist and have first dimension larger than
+        `sum(images_per_class)`.
+    num_images : int
+        The number of images we are expecting from the workers.
+    images_per_class : sequence
+        A sequence containing the number of images in each class,
+        with as many elements as there are classes.
+    flush_frequency : int, optional
+        The number of batches after which we should flush the HDF5
+        file to disk.
+    shuffle_seed : int or sequence
+        Seed for a `numpy.random.RandomState` used to shuffle the training
+        set order.
+    sink_port : int, optional
+        The port on which the sink should listen.
+    logging_port : int, optional
+        The port on which a logger process is presumed to be listening,
+        to which the sink will connect and send `LogRecord`s.
+    high_water_mark : int, optional
+        The high water mark for the receiving socket. Controls memory
+        usage by ZeroMQ message buffers. Default is 10.
+
+    """
     context = zmq.Context()
 
     # Set up logging.
@@ -572,11 +618,13 @@ def _cropped_transposed_patched(tar, jpeg_filename, patch_images, image_dim):
         The length to which the shorter side of the image should be
         scaled. After cropping the central square, the resulting
         image will be `image_dim` x `image_dim`.
+
     Returns
     -------
     ndarray
         An ndarray of shape `(1, 3, image_dim, image_dim)` containing
         an image.
+
     """
     # TODO: make the square_crop configurable from calling functions.
     image = patch_images.get(os.path.basename(jpeg_filename), None)
