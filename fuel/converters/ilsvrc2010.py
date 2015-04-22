@@ -179,7 +179,7 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
         debug(status='STARTED_SET', which_set='train',
               total_images_in_set=n_train)
         process_train_set(f, train, patch, synsets['num_train_images'],
-                          wnid_map, n_train, image_dim, num_workers,
+                          wnid_map, image_dim, num_workers,
                           worker_batch_size)
         debug(status='FINISHED_SET', which_set='train')
         ilsvrc_id_to_zero_based = dict(zip(synsets['ILSVRC2010_ID'],
@@ -211,7 +211,7 @@ def ilsvrc2010(input_directory, save_path, image_dim=256,
 
 
 def process_train_set(hdf5_file, train_archive, patch_archive,
-                      train_images_per_class, wnid_map, n_train, image_dim,
+                      train_images_per_class, wnid_map, image_dim,
                       num_workers, worker_batch_size):
     """Process the ILSVRC2010 training set.
 
@@ -222,11 +222,11 @@ def process_train_set(hdf5_file, train_archive, patch_archive,
     patch_archive :  str or file-like object
     train_images_per_class : sequence
     wnid_map : dict
-    n_train : int
     image_dim : int
     num_workers : int
     worker_batch_size : int
     """
+    n_train = sum(train_images_per_class)
     ventilator = multiprocessing.Process(target=train_set_ventilator,
                                          args=(train_archive,))
     ventilator.start()
