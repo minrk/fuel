@@ -397,7 +397,8 @@ def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
         tar_data = io.BytesIO(receiver.recv())
         debug(status='RECEIVED_TAR', tar_filename=name, number=num,
               label_id=label)
-
+        # TODO: factor this with block (minus the Exception handler) out
+        # into a function/generator.
         with tarfile.open(fileobj=tar_data) as tar:
             debug(status='OPENED', tar_filename=name, number=num)
             images_gen = (_cropped_transposed_patched(tar, jpeg_info.name,
