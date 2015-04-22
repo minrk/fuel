@@ -551,8 +551,8 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
                              dtype=train_mean.dtype)
     hdf5_file.create_dataset('features_train_std', shape=train_std.shape,
                              dtype=train_std.dtype)
-    hdf5_file['features_train_mean'] = train_mean
-    hdf5_file['features_train_std'] = train_std
+    hdf5_file['features_train_mean'][...] = train_mean
+    hdf5_file['features_train_std'][...] = train_std
     # hdf5_file['features'].dims.create_scale(hdf5_file['features_train_mean'],
     #                                         'train_mean')
     # hdf5_file['features'].dims.create_scale(hdf5_file['features_train_std'],
