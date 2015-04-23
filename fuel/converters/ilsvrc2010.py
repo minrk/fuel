@@ -1,6 +1,5 @@
 from __future__ import division
 from contextlib import closing
-# import errno
 import gzip
 import io
 import itertools
@@ -26,6 +25,7 @@ from fuel.utils.logging import (SubprocessFailure, ProgressBarHandler,
                                 make_debug_logging_function,
                                 zmq_log_and_monitor,
                                 configure_zmq_process_logger)
+from fuel.utils.zmq import uninterruptible
 from picklable_itertools.extras import equizip
 log = logging.getLogger(__name__)
 
@@ -334,8 +334,9 @@ def train_set_ventilator(f, ventilator_port=5557, sink_port=5558,
                 with closing(tar.extractfile(inner_tar.name)) as f:
                     debug(status='SENDING_TAR', tar_filename=inner_tar.name,
                           number=num)
-                    sender.send_pyobj((num, inner_tar.name), zmq.SNDMORE)
-                    sender.send(f.read())
+                    uninterruptible(sender.send_pyobj, (num, inner_tar.name),
+                                    zmq.SNDMORE)
+                    uninterruptible(sender.send, f.read())
                     debug(status='SENT_TAR', tar_filename=inner_tar.name,
                           number=num)
         log.debug('SHUTDOWN')
@@ -403,7 +404,7 @@ def train_set_worker(patch_images_archive, wnid_map, images_per_class,
 
     while True:
         debug(status='RECEIVING_TAR')
-        num, name = receiver.recv_pyobj()
+        num, name = uninterruptible(receiver.recv_pyobj)
         label = wnid_map[name.split('.')[0]]
         tar_data = io.BytesIO(receiver.recv())
         debug(status='RECEIVED_TAR', tar_filename=name, number=num,
@@ -422,10 +423,10 @@ def train_set_worker(patch_images_archive, wnid_map, images_per_class,
                     debug(status='SENDING_BATCH', tar_filename=name,
                           number=num, num_images=len(images),
                           total_so_far=total_images, label=label)
-                    sender.send_pyobj(label, zmq.SNDMORE)
-                    send_arrays(sender,
-                                [numpy.concatenate(images),
-                                 numpy.array(files, dtype='S32')])
+                    uninterruptible(sender.send_pyobj, label, zmq.SNDMORE)
+                    uninterruptible(send_arrays, sender,
+                                    [numpy.concatenate(images),
+                                     numpy.array(files, dtype='S32')])
                     total_images += len(images)
                     debug(status='SENT_BATCH', tar_filename=name, number=num,
                           num_images=len(images), total_so_far=total_images,
@@ -506,8 +507,8 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
         while num_images_written < num_images:
             # Receive a label and a batch of images.
             debug(status='RECEIVING_BATCH')
-            label = receiver.recv_pyobj()
-            images, files = recv_arrays(receiver)
+            label = uninterruptible(receiver.recv_pyobj)
+            images, files = uninterruptible(recv_arrays, receiver)
             batches_received += 1
             debug(status='RECEIVED_BATCH', label=label,
                   num_images=images.shape[0], batch=batches_received)
