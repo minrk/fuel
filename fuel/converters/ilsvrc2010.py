@@ -479,7 +479,8 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
         The port on which the sink should listen.
     logging_port : int, optional
         The port on which a logger process is presumed to be listening,
-        to which the sink will connect and send `LogRecord`s.
+        to which the sink will connect and send `LogRecord`s (see
+        :func:`configure_zmq_process_logger`).
     high_water_mark : int, optional
         The high water mark for the receiving socket. Controls memory
         usage by ZeroMQ message buffers. Default is 10.

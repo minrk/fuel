@@ -93,6 +93,7 @@ class ZMQLoggingHandler(logging.Handler):
                           else formatter)
 
     def emit(self, record):
+        """Send a `LogRecord` over the socket."""
         try:
             # Tracebacks aren't picklable, so cache the traceback text
             # and then throw away the traceback object. This seems to
