@@ -236,12 +236,12 @@ class DivideAndConquerSink(DivideAndConquerBase):
         The address (e.g. `tcp://somehost:9534`) or port (as an
         integer) on which the receiver should listen for worker
         results.
-    receiver_hwm : int
+    receiver_hwm : int, optional
         High water mark to set on the receiver socket. Default
         is to not set one.
 
     """
-    def __init__(self, receiver_spec, receiver_hwm):
+    def __init__(self, receiver_spec, receiver_hwm=None):
         self.receiver_spec = receiver_spec
         self.receiver_hwm = receiver_hwm
 
