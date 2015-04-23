@@ -42,9 +42,6 @@ IMAGE_TARS = TRAIN_IMAGES_TAR, VALID_IMAGES_TAR, TEST_IMAGES_TAR
 ALL_FILES = IMAGE_TARS + (TEST_GROUNDTRUTH, DEVKIT_ARCHIVE, PATCH_IMAGES_TAR)
 
 
-# Wrapper for catching interrupted system call. Unsure if we really need
-# this.
-
 def ilsvrc2010(input_directory, save_path, image_dim=256,
                shuffle_train_set=True, shuffle_seed=(2015, 4, 1),
                num_workers=6, worker_batch_size=1024,
