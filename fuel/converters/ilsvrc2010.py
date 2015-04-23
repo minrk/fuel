@@ -1,6 +1,5 @@
 from __future__ import division
 from contextlib import closing
-from collections import defaultdict
 # import errno
 import functools
 import gzip
@@ -555,8 +554,6 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
     images_sum = None
     images_sq_sum = None
     num_images_written = 0
-    num_images_by_label = defaultdict(lambda: 0)
-
     features = hdf5_file['features']
     targets = hdf5_file['targets']
     filenames = hdf5_file['filenames']
@@ -588,7 +585,6 @@ def train_set_sink(hdf5_file, num_images, images_per_class,
             filenames[indices] = files
 
             num_images_written += images.shape[0]
-            num_images_by_label[label] += images.shape[0]
 
             debug(status='WRITTEN', label=label,
                   num_images=images.shape[0], batch=batches_received,
