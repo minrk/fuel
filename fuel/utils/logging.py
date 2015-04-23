@@ -1,6 +1,58 @@
 import logging
+import os
+
+import progressbar
 import zmq
-import traceback
+
+
+class ProgressBarHandler(logging.Handler):
+    """A :class:`~logging.Handler` that drives a progress bar.
+
+    Parameters
+    ----------
+    max_val_attr : str
+        The attribute name used for the maximum value of the
+        progress bar, used to trigger a new progress bar being started.
+    curr_val_attr : str
+        The attribute name used for the current value of the progress
+        bar, used to trigger an update to the progress bar.
+    start_predicate : callable, optional
+        A callable that returns `True` if a given `LogRecord` signals
+        the start of a progress bar. If unspecified, the presence of
+        `max_val_attr` is used as the test.
+    update_predicate : callable
+        A callable that returns `True` if a given `LogRecord` signals
+        an update of a progress bar. If unspecified, the presence of
+        `curr_val_attr` is used as the test.
+    level : int, optional
+        The level of messages expected to contain progress bar signaling.
+        Defaults to `logging.DEBUG`.
+
+    """
+    def __init__(self, max_val_attr, curr_val_attr, widgets=None,
+                 start_predicate=None, update_predicate=None,
+                 level=logging.DEBUG):
+        super(ProgressBarHandler, self).__init__(level)
+        self.max_val_attr = max_val_attr
+        self.curr_val_attr = curr_val_attr
+        self.widgets = widgets
+        self.start_predicate = (start_predicate if start_predicate is not None
+                                else lambda x: hasattr(x, self.max_val_attr))
+        self.update_predicate = (update_predicate
+                                 if update_predicate is not None
+                                 else lambda x: hasattr(x, self.curr_val_attr))
+        self.level = level
+
+    def handle(self, record):
+        """Handle a `LogRecord`, updating a progress bar if necessary."""
+        if self.start_predicate(record):
+            maxval = getattr(record, self.max_val_attr)
+            self.progress_bar = progressbar.ProgressBar(
+                maxval=maxval,
+                widgets=self.widgets).start()
+        elif self.update_predicate(record):
+            currval = getattr(record, self.curr_val_attr)
+            self.progress_bar.update(currval)
 
 
 class SubprocessFailure(Exception):
@@ -58,6 +110,69 @@ class ZMQLoggingHandler(logging.Handler):
             self.handleError(record)
 
 
+def configure_zmq_process_logger(logger, context, logging_port):
+    """Configures a logger object to log to a ZeroMQ socket.
+
+    Parameters
+    ----------
+    logger : :class:`logging.Logger`
+        A logger object, as returned by :func:`logging.getLogger`.
+    context : :class:`zmq.Context`
+        A ZeroMQ context.
+    logging_port : int
+        The port on localhost on which to open a `PUSH` socket
+        for sending :class:`logging.LogRecord`s.
+
+    Notes
+    -----
+    Mutates the logger object by removing any existing handlers,
+    setting the `propagate` attribute to `False`, and adding a
+    :class:`ZMQLoggingHandler` set up to log messages to a socket
+    connected on `logging_port`.
+
+    """
+    logger.propagate = False
+    socket = context.socket(zmq.PUSH)
+    socket.connect("tcp://localhost:{}".format(logging_port))
+    while logger.handlers:
+        logger.handlers.pop()
+    logger.addHandler(ZMQLoggingHandler(socket))
+
+
+def make_debug_logging_function(logger, process_type):
+    """Return a callable for logging keyword argument-based debug messages.
+
+    Parameters
+    ----------
+    logger : object
+        Logger-like object with a `debug()` method matching the
+        signature of the same method from :class:`logging.Logger`.
+    process_type : str
+        A string that will be included at the beginning of each message,
+        along with the PID in parentheses.
+
+    Returns
+    -------
+    debug_log_fn : callable
+        A function that expects one mandatory argument `status`, and
+        as many keyword arguments as desired. The keywords and their
+        values will appear in the log message as *key=value* (sorted
+        by key), and will also be available as attributes on the
+        corresponding `LogRecord` object.
+
+    """
+    def _debug(status, **kwargs):
+        pid = os.getpid()
+        message_str = '{process_type}({pid}): {status} '.format(
+            process_type=process_type, pid=pid, status=status)
+        message_str += ' '.join('{key}={val}'.format(key=key, val=kwargs[key])
+                                for key in sorted(kwargs))
+        kwargs['process_type'] = process_type
+        kwargs['status'] = status
+        logger.debug(message_str, extra=kwargs)
+    return _debug
+
+
 def zmq_log_and_monitor(logger, context, processes=(), logging_port=5559,
                         failure_threshold=logging.CRITICAL):
     """Feed `LogRecord`s received on a ZeroMQ socket to a logger.
@@ -108,32 +223,3 @@ def zmq_log_and_monitor(logger, context, processes=(), logging_port=5559,
         logger.handle(message)
         if levelno >= failure_threshold:
             raise SubprocessFailure
-
-
-def configure_zmq_process_logger(logger, context, logging_port):
-    """Configures a logger object to log to a ZeroMQ socket.
-
-    Parameters
-    ----------
-    logger : :class:`logging.Logger`
-        A logger object, as returned by :func:`logging.getLogger`.
-    context : :class:`zmq.Context`
-        A ZeroMQ context.
-    logging_port : int
-        The port on localhost on which to open a `PUSH` socket
-        for sending :class:`logging.LogRecord`s.
-
-    Notes
-    -----
-    Mutates the logger object by removing any existing handlers,
-    setting the `propagate` attribute to `False`, and adding a
-    :class:`ZMQLoggingHandler` set up to log messages to a socket
-    connected on `logging_port`.
-
-    """
-    logger.propagate = False
-    socket = context.socket(zmq.PUSH)
-    socket.connect("tcp://localhost:{}".format(logging_port))
-    while logger.handlers:
-        logger.handlers.pop()
-    logger.addHandler(ZMQLoggingHandler(socket))

@@ -23,8 +23,11 @@ import zmq
 
 from fuel.datasets import H5PYDataset
 from fuel.server import send_arrays, recv_arrays
-from fuel.utils.logging import (SubprocessFailure, zmq_log_and_monitor,
+from fuel.utils.logging import (SubprocessFailure, ProgressBarHandler,
+                                make_debug_logging_function,
+                                zmq_log_and_monitor,
                                 configure_zmq_process_logger)
+from picklable_itertools.extras import equizip
 log = logging.getLogger(__name__)
 
 DEVKIT_ARCHIVE = 'ILSVRC2010_devkit-1.0.tar.gz'
@@ -42,56 +45,6 @@ ALL_FILES = IMAGE_TARS + (TEST_GROUNDTRUTH, DEVKIT_ARCHIVE, PATCH_IMAGES_TAR)
 
 # Wrapper for catching interrupted system call. Unsure if we really need
 # this.
-#
-# def uninterruptible(*args, **kwargs):
-#     while True:
-#         try:
-#             return f(*args, **kwargs)
-#         except zmq.ZMQError as e:
-#             if e.errno == errno.EINTR:
-#                 # interrupted, try again
-#                 continue
-#             else:
-#                 # real error, raise it
-#                 raise
-
-def make_debug_logging_function(logger, process_type, **additional_attrs):
-    """Return a callable for logging keyword argument-based debug messages.
-
-    Parameters
-    ----------
-    logger : object
-        Logger-like object with a `debug()` method matching the
-        signature of the same method from :class:`logging.Logger`.
-    process_type : str
-        A string that will be included at the beginning of each message,
-        along with the PID in parentheses.
-    \*\*additional_attrs
-        Other attributes that should appear on every `LogRecord` emitted
-        by the returned function (but not in the message).
-
-    Returns
-    -------
-    debug_log_fn : callable
-        A function that expects one mandatory argument `status`, and
-        as many keyword arguments as desired. The keywords and their
-        values will appear in the log message as *key=value* (sorted
-        by key), and will also be available as attributes on the
-        corresponding `LogRecord` object.
-
-    """
-    def _debug(status, **kwargs):
-        pid = os.getpid()
-        message_str = '{process_type}({pid}): {status} '.format(
-            process_type=process_type, pid=pid, status=status)
-        message_str += ' '.join('{key}={val}'.format(key=key, val=kwargs[key])
-                                for key in sorted(kwargs))
-        kwargs['process_type'] = process_type
-        kwargs['status'] = status
-        kwargs.update(additional_attrs)
-        logger.debug(message_str, extra=kwargs)
-    return _debug
-
 
 def ilsvrc2010(input_directory, save_path, image_dim=256,
                shuffle_train_set=True, shuffle_seed=(2015, 4, 1),
@@ -919,35 +872,6 @@ def extract_patch_images(f, which_set=None):
             image = _imread(tar.extractfile(info_obj.name))
             patch_images[filename] = image
     return patch_images
-
-
-import progressbar
-
-
-class ProgressBarHandler(logging.Handler):
-    def __init__(self, max_val_attr, curr_val_attr, widgets=None,
-                 start_predicate=None, update_predicate=None,
-                 level=logging.DEBUG):
-        super(ProgressBarHandler, self).__init__(level)
-        self.max_val_attr = max_val_attr
-        self.curr_val_attr = curr_val_attr
-        self.widgets = widgets
-        self.start_predicate = (start_predicate if start_predicate is not None
-                                else lambda x: hasattr(x, self.max_val_attr))
-        self.update_predicate = (update_predicate
-                                 if update_predicate is not None
-                                 else lambda x: hasattr(x, self.curr_val_attr))
-        self.level = level
-
-    def handle(self, record):
-        if self.start_predicate(record):
-            maxval = getattr(record, self.max_val_attr)
-            self.progress_bar = progressbar.ProgressBar(
-                maxval=maxval,
-                widgets=self.widgets).start()
-        elif self.update_predicate(record):
-            currval = getattr(record, self.curr_val_attr)
-            self.progress_bar.update(currval)
 
 
 if __name__ == "__main__":
