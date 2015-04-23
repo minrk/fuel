@@ -193,6 +193,8 @@ class DivideAndConquerWorker(DivideAndConquerBase):
 
     def setup_sockets(self, context):
         self._receiver = context.socket(zmq.PULL)
+        if self.receiver_hwm is not None:
+            self._receiver.hwm = self.receiver_hwm
         self._receiver.bind(self.as_spec(self.receiver_spec, 'tcp://*:{}'))
         self._sender = context.socket(zmq.PUSH)
         if self.sender_hwm is not None:
@@ -261,8 +263,9 @@ class DivideAndConquerSink(DivideAndConquerBase):
 
     def setup_sockets(self, context):
         self._receiver = context.socket(zmq.PULL)
-        self._receiver.hwm = self.receiver_hwm
-        self._receiver.bind(self.as_spec(self.receiver_spec))
+        if self.receiver_hwm is not None:
+            self._receiver.hwm = self.receiver_hwm
+        self._receiver.bind(self.as_spec(self.receiver_spec, 'tcp://*:{}'))
 
     def run(self, context=None):
         self.setup_sockets(context if context is not None else zmq.context())
