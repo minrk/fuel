@@ -200,9 +200,24 @@ class DivideAndConquerWorker(DivideAndConquerBase):
         self._sender.connect(self.as_spec(self.sender_spec,
                                           'tcp://localhost:{}'))
 
+    def done(self):
+        """Indicate whether the worker should terminate.
+
+        Notes
+        -----
+        Usually, a worker *can't* know that no further work batches will
+        be dispatched, as it has no idea what other workers have done.
+        However there are restricted cases where it is predictable, and
+        one could potentially build in a mechanism for the ventilator
+        to communicate this information. THe default implementation
+        returns `False` unconditionally.
+
+        """
+        return False
+
     def work_loop(self):
         """Loop indefinitely receiving, processing and sending."""
-        while True:
+        while not self.done():
             received = self.recv(self._receiver)
             for output in self.process(*received):
                 self.send(self._sender, *output)
