@@ -244,13 +244,20 @@ def process_other_set(hdf5_file, archive, patch_archive, groundtruth,
         and `filenames` already exist and are at least as long as
         `offset` plus the number of files in `archive`.
     archive : str or file-like object
+        The path or file-handle containing the TAR file of images to be
+        processed.
     patch_archive : str or file-like object
+        The path or file-handle containing the TAR file of patch
+        images (see :func:`extract_patch_images`).
     groundtruth : ndarray, 1-dimensional
         Integer targets, with the same length as the number of images
     which_set : str
         One of 'valid' or 'test', used to extract the right patch images.
     worker_batch_size : int
         The number of examples/targets to write at a time.
+    image_dim : int
+        The width and height of the desired images after resizing and
+        central cropping.
     offset : int
         The offset in the `features` and `targets` arrays at which to
         begin writing rows.
