@@ -246,8 +246,7 @@ def process_train_set(hdf5_file, train_archive, patch_archive,
                                          args=(train_archive,))
     ventilator.start()
     workers = [multiprocessing.Process(target=train_set_worker,
-                                       args=(train_archive,
-                                             patch_archive, wnid_map,
+                                       args=(patch_archive, wnid_map,
                                              train_images_per_class,
                                              image_dim,
                                              worker_batch_size))
@@ -340,6 +339,37 @@ def process_other_set(hdf5_file, archive, patch_archive, groundtruth,
 
 def train_set_ventilator(f, ventilator_port=5557, sink_port=5558,
                          logging_port=5559, high_water_mark=10):
+    """Serves tasks to workers via ZeroMQ sockets.
+
+    Parameters
+    ----------
+    f : str or file-like object
+        Path or file-handle to a TAR file containing TAR files,
+        where each inner TAR file contains images of a given class.
+    ventilator_port : int, optional
+        The port on which the ventilator should listen and push
+        messages, containing a TAR file of images of a given
+        class.
+    sink_port : int, optional
+        The port on which the sink is listening, used to send
+        one message to synchronize the start of processing.
+    logging_port : int, optional
+        The port on which a logger process is presumed to be listening,
+        to which the ventilator will connect and send `LogRecord`s (see
+        :func:`configure_zmq_process_logger`).
+    high_water_mark : int, optional
+        High water mark to set on the socket. Controls memory
+        usage when the workers get backed up. Default is 10.
+
+    Notes
+    -----
+    This function sends two messages for each inner TAR file it
+    encounters. The first is sent as a Python object: a tuple indicating
+    the number in the sequence of inner TAR files read and its filename.
+    The second is a raw byte stream containing the inner TAR file
+    itself.
+
+    """
     try:
         context = zmq.Context()
         configure_zmq_process_logger(log, context, logging_port)
@@ -368,10 +398,44 @@ def train_set_ventilator(f, ventilator_port=5557, sink_port=5558,
         context.destroy()
 
 
-def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
-                     image_dim=256, worker_batch_size=128,
-                     ventilator_port=5557, sink_port=5558, logging_port=5559,
+def train_set_worker(patch_images_archive, wnid_map, images_per_class,
+                     image_dim, worker_batch_size, ventilator_port=5557,
+                     sink_port=5558, logging_port=5559,
                      receiver_high_water_mark=10, sender_high_water_mark=10):
+    """Launch a worker that receives TARs and processes the images inside.
+
+    Parameters
+    ----------
+    patch_images_archive : str or file-like object
+        The path or file-handle from which to read the patch images
+        archive.
+    wnid_map : dict
+        A dictionary mapping WordNet IDs to class indices.
+    images_per_class : sequence
+        A sequence containing the number of images in each class,
+        with as many elements as there are classes.
+    ventilator_port : int
+        The port on which the worker should connect to the ventilator
+        and receive tasks.
+    sink_port : int
+        The port on which the worker should connect to the sink and
+        send completed batches of images.
+    logging_port : int
+        The port on which a logger process is presumed to be listening,
+        to which the worker will connect and send `LogRecord`s (see
+        :func:`configure_zmq_process_logger`).
+    receiver_high_water_mark : int, optional
+        Approximate size of the queue used to buffer incoming
+        messages received from the ventilator. Limits memory
+        consumption caused by holding too many large incoming messages
+        in memory. Default is 10.
+    sender_high_water_mark : int, optional
+        Approximate size of the queue used to buffer messages sent
+        to the sink. Limits memory consumption when the sink is
+        not writing fast enough to accomodate all incoming messages.
+        Default is 10.
+
+    """
     context = zmq.Context()
     configure_zmq_process_logger(log, context, logging_port)
     debug = make_debug_logging_function(log, 'WORKER')
@@ -388,7 +452,7 @@ def train_set_worker(f, patch_images_path, wnid_map, images_per_class,
     sender.connect('tcp://localhost:{}'.format(sink_port))
     debug(status='CONNECTED_SINK', port=sink_port)
 
-    patch_images = extract_patch_images(patch_images_path, 'train')
+    patch_images = extract_patch_images(patch_images_archive, 'train')
 
     while True:
         debug(status='RECEIVING_TAR')
