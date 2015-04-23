@@ -894,7 +894,7 @@ def read_metadata(meta_mat):
     return new_synsets, cost_matrix
 
 
-def extract_patch_images(f, which_set=None):
+def extract_patch_images(f, which_set):
     """Extracts a dict of the "patch images" for ILSVRC2010.
 
     Parameters
