@@ -99,10 +99,8 @@ class ZMQLoggingHandler(logging.Handler):
             # and then throw away the traceback object. This seems to
             # allow the text to still be displayed by the default Formatter.
             if record.exc_info:
-                record.exc_text = (
-                    "Traceback (most recent call last):\n" +
-                    "".join(traceback.format_tb(record.exc_info[2]))
-                )
+                record.exc_text = self.formatter.formatException(
+                    record.exc_info)
                 record.exc_info = record.exc_info[:2] + (None,)
             self.socket.send_pyobj(record)
         except (KeyboardInterrupt, SystemExit):

@@ -1,7 +1,6 @@
 from __future__ import division
 from contextlib import closing
 # import errno
-import functools
 import gzip
 import io
 import itertools
@@ -264,22 +263,18 @@ def process_other_set(hdf5_file, archive, patch_archive, groundtruth,
     int
         A stream of integers. Each represents the number of examples
         processed so far, in increments of `worker_batch_size`.
+
     """
     features = hdf5_file['features']
     targets = hdf5_file['targets']
     filenames = hdf5_file['filenames']
     patch_images = extract_patch_images(patch_archive, which_set)
     with _open_tar_file(archive) as tar:
-        jpeg_files = sorted(info.name for info in tar
-                            if info.name.endswith('.JPEG'))
-        images_gen = (_cropped_transposed_patched(tar, filename,
-                                                  patch_images, image_dim)
-                      for filename in jpeg_files)
         start = offset
-        partitioner = functools.partial(partition_all, worker_batch_size)
-        combined = zip(*[partitioner(s) for s in [images_gen, groundtruth,
-                                                  jpeg_files]])
-        for images, labels, files in combined:
+        work_iter = cropped_resized_images_from_tar(tar, patch_images,
+                                                    image_dim, groundtruth)
+        for tuples_batch in partition_all(worker_batch_size, work_iter):
+            images, labels, files = zip(*tuples_batch)
             this_chunk = len(images)
             features[start:start + this_chunk] = numpy.concatenate(images)
             targets[start:start + this_chunk] = labels
@@ -417,17 +412,13 @@ def train_set_worker(patch_images_archive, wnid_map, images_per_class,
         # into a function/generator.
         with tarfile.open(fileobj=tar_data) as tar:
             debug(status='OPENED', tar_filename=name, number=num)
-            images_gen = (_cropped_transposed_patched(tar, jpeg_info.name,
-                                                      patch_images, image_dim)
-                          for jpeg_info in tar)
-            fname_gen = (os.path.basename(jpeg_info.name).encode('ascii')
-                         for jpeg_info in tar.getmembers())
             total_images = 0
             # Send images to sink in batches of at most worker_batch_size.
             try:
-                comb_gen = zip(partition_all(worker_batch_size, images_gen),
-                               partition_all(worker_batch_size, fname_gen))
-                for images, files in comb_gen:
+                combined = cropped_resized_images_from_tar(tar, patch_images,
+                                                           image_dim)
+                for tuples in partition_all(worker_batch_size, combined):
+                    images, files, _ = zip(*tuples)
                     debug(status='SENDING_BATCH', tar_filename=name,
                           number=num, num_images=len(images),
                           total_so_far=total_images, label=label)
@@ -615,42 +606,109 @@ def _imread(f):
         return numpy.array(f.convert('RGB'))
 
 
-def _cropped_transposed_patched(tar, jpeg_filename, patch_images, image_dim):
-    """Do everything necessary to process a JPEG inside a TAR.
+def reshape_hwc_to_bchw(image):
+    """Reshape an image to `(1, channels, image_height, image_width)`.
+
+    Parameters
+    ----------
+    image : ndarray, shape `(image_height, image_width, channels)`
+        The image to be resized.
+
+    Returns
+    -------
+    ndarray, shape `(1, channels, image_height, image_width)`
+        The same image data with the order of axes swapped, and a
+        singleton leading axis added, making it convenient to
+        pass a sequence of these to :func:`numpy.concatenate`.
+
+    Notes
+    -----
+    `(batch, channel, height, width)` is the standard format for Theano's
+    and cuDNN's convolution operations, so it makes most sense to store
+    data in that layout.
+
+    """
+    return image.transpose(2, 0, 1)[numpy.newaxis]
+
+
+def load_image_from_tar_or_patch(tar, image_filename, patch_images):
+    """Do everything necessary to process a image inside a TAR.
 
     Parameters
     ----------
     tar : `TarFile` instance
-        The tar from which to read `jpeg_filename`.
-    jpeg_filename : str
-        Fully-qualified path inside of `tar` from which to read a
-        JPEG file.
+        The tar from which to read `image_filename`.
+    image_filename : str
+        Fully-qualified path inside of `tar` from which to read an
+        image file.
     patch_images : dict
         A dictionary containing filenames (without path) of replacements
         to be substituted in place of the version of the same file found
         in `tar`. Values are in `(width, height, channels)` layout.
-    image_dim : int
-        The length to which the shorter side of the image should be
-        scaled. After cropping the central square, the resulting
-        image will be `image_dim` x `image_dim`.
 
     Returns
     -------
     ndarray
-        An ndarray of shape `(1, 3, image_dim, image_dim)` containing
-        an image.
+        An ndarray of shape `(height, width, 3)` representing an RGB image
+        drawn either from the TAR file or the patch dictionary.
 
     """
-    # TODO: make the square_crop configurable from calling functions.
-    image = patch_images.get(os.path.basename(jpeg_filename), None)
+    image = patch_images.get(os.path.basename(image_filename), None)
     if image is None:
         try:
-            image = _imread(tar.extractfile(jpeg_filename))
+            image = _imread(tar.extractfile(image_filename))
         except (IOError, OSError):
-            with gzip.GzipFile(fileobj=tar.extractfile(jpeg_filename)) as gz:
+            with gzip.GzipFile(fileobj=tar.extractfile(image_filename)) as gz:
                 image = _imread(gz)
+    return image
 
-    return square_crop(image, dim=image_dim).transpose(2, 0, 1)[numpy.newaxis]
+
+def cropped_resized_images_from_tar(tar, patch_images, image_dim,
+                                    groundtruth=None):
+    """Generator that yields `(filename, image, label)` tuples.
+
+    Parameters
+    ----------
+    tar : TarFile instance
+        Open `TarFile` instance from which to read images.
+    patch_images : dict
+        A dictionary mapping (base, without-path) filenames to images
+        which should be substituted for that filename rather than reading
+        it from the TAR file.
+    images_dim : int
+        The width and height of the returned resized-and-square-cropped
+        images (see :func:`square_crop`).
+    groundtruth : iterable, optional
+        An iterable containing one integer label for each image in
+        `filenames` (or each regular image in `tar` if `filenames`
+        is left unspecified). Assumed to be sorted by filename of
+        every regular file in `tar`. If `None`, a value of `None`
+        will be emitted for every label.
+
+    Yields
+    ------
+    filename
+        A string representing the (base, without path) filename.
+    image
+        An image drawn from either the TAR archive or the `patch_images`
+        dictionary (see :func:`load_image_from_tar_or_patch`), cropped
+        and resized to `(image_dim, image_dim)` (see :func:`square_crop`).
+    label
+        An integer label for the given image, or `None` if no groundtruth
+        was available.
+
+    """
+    filenames = sorted(info.name for info in tar if info.isfile())
+    if groundtruth is None:
+        groundtruth = itertools.repeat(None, times=len(filenames))
+    images_gen = (load_image_from_tar_or_patch(tar, filename, patch_images)
+                  for filename in filenames)
+    crops_gen = (square_crop(image, image_dim) for image in images_gen)
+    reshapes_gen = (reshape_hwc_to_bchw(image) for image in crops_gen)
+    filenames_gen = (os.path.basename(f) for f in filenames)
+    reshapes_gen, filenames_gen
+    for tup in equizip(reshapes_gen, groundtruth, filenames_gen):
+        yield tup
 
 
 def permutation_by_class(order, images_per_class):
@@ -682,7 +740,7 @@ def permutation_by_class(order, images_per_class):
     return result
 
 
-def square_crop(image, dim=256):
+def square_crop(image, dim):
     """Crop an image to the central square after resizing it.
 
     Parameters
