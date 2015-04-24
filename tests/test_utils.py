@@ -51,6 +51,8 @@ class DummyVentilator(DivideAndConquerVentilator):
         socket.send_pyobj(number)
 
     def produce(self):
+         # temporary workaround for race with workers on first message
+        time.sleep(0.25)
         for i in range(50):
             yield i
 
