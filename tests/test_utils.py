@@ -88,6 +88,7 @@ class DummySink(DivideAndConquerSink):
         self.sum += number_squared
 
     def shutdown(self):
+        print('sending', self.sum)
         self.result_socket.send_pyobj(self.sum)
 
 
@@ -105,4 +106,8 @@ def test_localhost_divide_and_conquer_manager():
     manager.launch()
     manager.wait_for_sink()
     result = result_socket.recv_pyobj()
+    print("Received", result)
     assert result == sum(i ** 2 for i in range(50))
+
+if __name__ == "__main__":
+    test_localhost_divide_and_conquer_manager()
