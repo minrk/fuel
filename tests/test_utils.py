@@ -1,5 +1,6 @@
 import errno
 import pickle
+import time
 from six.moves import range
 import zmq
 
@@ -73,30 +74,41 @@ class DummySink(DivideAndConquerSink):
         self.sum = 0
 
     def recv(self, socket):
+        print('Receiving message', self.messages_received)
+        received = socket.recv_pyobj()
+        print('Received!', received)
         self.messages_received += 1
-        return socket.recv_pyobj()
+        print('incremented, sum =', self.sum)
+        return received
 
     def done(self):
         return self.messages_received >= 50
 
     def setup_sockets(self, context, *args, **kwargs):
         super(DummySink, self).setup_sockets(context, *args, **kwargs)
-        self.result_socket = context.socket(zmq.PUB)
-        self.result_socket.bind('tcp://*:{}'.format(self.result_port))
-        self.result_sync = context.socket(zmq.REP)
-        self.result_sync.bind('tcp://*:{}'.format(self.sync_port))
 
     def process(self, number_squared):
+        print('Received', number_squared, 'for processing')
         self.sum += number_squared
+        print('self.sum is now', self.sum)
 
     def shutdown(self):
-        self.result_sync.recv()
-        print('Received sync packet (in sink)')
-        print('Sending sync reply (in sink)')
-        self.result_sync.send(b'')
-        print('Sent sync reply (in sink)')
-        print('sending', self.sum)
-        self.result_socket.send_pyobj(self.sum)
+        print('SHUTTING DOWN!', self.sum)
+        self._receiver.close()
+        # Socket to talk to clients
+        publisher = self.context.socket(zmq.PUB)
+        # set SNDHWM, so we don't drop messages for slow subscribers
+        publisher.sndhwm = 1100000
+        publisher.bind('tcp://*:{}'.format(self.result_port))
+
+        # Socket to receive signals
+        syncservice = self.context.socket(zmq.REP)
+        syncservice.bind('tcp://*:{}'.format(self.sync_port))
+        # wait for synchronization request
+        syncservice.recv()
+        # send synchronization reply
+        syncservice.send(b'')
+        publisher.send_pyobj(self.sum)
 
 
 def test_localhost_divide_and_conquer_manager():
@@ -111,18 +123,22 @@ def test_localhost_divide_and_conquer_manager():
                                                ventilator_port, sink_port)
     context = zmq.Context()
     manager.launch()
-    result_socket = context.socket(zmq.SUB)
-    result_socket.connect('tcp://localhost:{}'.format(result_port))
-    sync_socket = context.socket(zmq.REQ)
-    sync_socket.connect('tcp://localhost:{}'.format(sync_port))
-    print('Sending sync packet (in test)')
-    sync_socket.send(b'')
-    print('Sent sync packet (in test)')
-    print('Receiving sync reply (in test)')
-    sync_socket.recv()
-    print('Got sync reply (in test)')
+    context = zmq.Context()
+
+    # First, connect our subscriber socket
+    subscriber = context.socket(zmq.SUB)
+    subscriber.connect('tcp://localhost:{}'.format(result_port))
+    subscriber.setsockopt(zmq.SUBSCRIBE, b'')
+    time.sleep(0.5)
+    # Second, synchronize with publisher
+    syncclient = context.socket(zmq.REQ)
+    syncclient.connect('tcp://localhost:{}'.format(sync_port))
+    # send a synchronization request
+    syncclient.send(b'')
+    # wait for synchronization reply
+    syncclient.recv()
     print('Receiving message (in test)')
-    result = result_socket.recv_pyobj()
+    result = subscriber.recv_pyobj()
     print("Received", result, '(in test)')
     manager.wait_for_sink()
     assert result == sum(i ** 2 for i in range(50))

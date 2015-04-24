@@ -175,7 +175,7 @@ class DivideAndConquerVentilator(DivideAndConquerBase):
     def run(self):
         try:
             self.check_setup()
-            self._sink.send(b'0')
+            self._sink.send(b'HELLO')
             for batch in self.produce():
                 self.send(self._sender, batch)
         finally:
@@ -333,12 +333,19 @@ class DivideAndConquerSink(DivideAndConquerBase):
     def run(self):
         self.check_setup()
         # Synchronize with the ventilator.
-        self._receiver.recv()
+        sync_packet = self._receiver.recv()
+        import binascii
+        print(binascii.hexlify(sync_packet))
+        assert sync_packet == b'HELLO'
         try:
             while not self.done():
                 self.process(self.recv(self._receiver))
+        except Exception as e:
+            print('Caught', e)
+            raise
         finally:
             self.shutdown()
+            self.context.destroy()
 
     def shutdown(self):
         """Called just before :method:`run` terminates.
