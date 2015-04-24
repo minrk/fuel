@@ -444,10 +444,13 @@ class LocalhostDivideAndConquerManager(object):
 
     def launch(self):
         """Launch ventilator, workers and sink in separate processes."""
-        ventilator_process = Process(target=self.launch_ventilator)
-        worker_processes = [Process(target=self.launch_worker, args=(worker,))
-                            for worker in self.workers]
-        sink_process = Process(target=self.launch_sink)
+        ventilator_process = Process(target=self.launch_ventilator,
+                                     name='VENTILATOR-{}'.format(self))
+        worker_processes = [Process(target=self.launch_worker, args=(worker,),
+                                    name='WORKER-{}-{}'.format(i, self))
+                            for i, worker in enumerate(self.workers)]
+        sink_process = Process(target=self.launch_sink,
+                               name='SINK-{}'.format(self))
         for process in [ventilator_process, sink_process] + worker_processes:
             process.start()
 
