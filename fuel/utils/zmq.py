@@ -19,8 +19,32 @@ def uninterruptible(f, *args, **kwargs):
                 # real error, raise it
                 raise
 
-def bind_to_address_port_or_range(socket, addr_or_port, default_addr='tcp://*',
-                                  max_retries=100):
+
+def from_port_or_addr(addr_or_port, default_addr):
+    """Wrapper that accepts an address or a port number.
+
+    Parameters
+    ----------
+    addr_or_port : str or int
+        Fully qualified address (e.g. `tcp://somehost:5932`) or port
+        (as integer).
+    default_addr : str
+        The address (with leading protocol, but no port) to use when
+        a port `addr_or_port` is a port number.
+
+    Returns
+    -------
+    result_addr : str
+        Either `addr_or_port` itself (if string) or `default_addr`
+        concatenated with it (if a port number).
+
+    """
+    return (addr_or_port if isinstance(addr_or_port, six.string_types)
+            else ':'.join([default_addr, str(addr_or_port)]))
+
+
+def bind_to_addr_port_or_range(socket, addr_or_port, default_addr,
+                               max_retries=100):
     """Bind to an address, port or random port in a range.
 
     Parameters
@@ -43,16 +67,19 @@ def bind_to_address_port_or_range(socket, addr_or_port, default_addr='tcp://*',
 
     """
     if isinstance(addr_or_port, (list, tuple)):
+        # Port range.
         min_port, max_port = addr_or_port
         return socket.bind_to_random_port(min_port, max_port, max_retries)
     else:
+        socket.bind(from_port_or_addr(addr_or_port, default_addr))
         if isinstance(addr_or_port, six.string_types):
+            # Fully-qualified address.
             port = int(addr_or_port.split(':')[-1])
-            socket.bind(addr_or_port)
-            return port
         else:
+            # Port number as integer.
             port = addr_or_port
         return port
+
 
 @six.add_metaclass(ABCMeta)
 class DivideAndConquerBase(object):
@@ -82,40 +109,18 @@ class DivideAndConquerBase(object):
         if not self.setup_done:
             raise ValueError('setup_sockets() must be called before run()')
 
-    @staticmethod
-    def as_spec(spec, port_template):
-        """Format a valid socket specification from (optionally) a port.
-
-        Parameters
-        ----------
-        spec : str or int
-            If string, interpreted as a full socket spec used by
-            a connect or bind call. If spec, interpreted as a port
-        port_template : str
-            A string formatting template with `{}` where a port
-            number should be placed.
-
-        Returns
-        -------
-        str
-            Either `spec` directly, if `spec` was initially a string,
-            or `port_template` with `spec` (presumed integer)
-            substituted in where `{}` appears (i.e. by `.format()`).
-
-        """
-
-        if isinstance(spec, six.string_types):
-            return spec
-        else:
-            return port_template.format(spec)
-
 
 @six.add_metaclass(ABCMeta)
 class DivideAndConquerVentilator(DivideAndConquerBase):
+    """The ventilator serves tasks on a PUSH socket to workers."""
+
     default_addr = 'tcp://*'
 
-    """The ventilator serves tasks on a PUSH socket to workers."""
-    def setup_sockets(self, context, sender_spec, sender_hwm, sink_spec):
+    def __init__(self):
+        self.port = None
+
+    def setup_sockets(self, context, sender_spec, sender_hwm=None,
+                      sink_spec=None):
         """Set up sockets for task dispatch.
 
         Parameters
@@ -124,7 +129,8 @@ class DivideAndConquerVentilator(DivideAndConquerBase):
             The address spec (e.g. `tcp://*:9534`), port (as an
             integer), or port range (e.g `(9000, 9050)` on which the
             ventilator should listen for worker connections and send
-            messages. If a port range is specified,
+            messages. If a port range is specified, a random port
+            in the range will be bound within that range.
         sender_hwm : int, optional
             High water mark to set on the sender socket. Default
             is to not set one.
@@ -133,35 +139,31 @@ class DivideAndConquerVentilator(DivideAndConquerBase):
             integer) on which the ventilator should connect to the
             sink in order to synchronize the start of work.
 
+        Raises
+        ------
+        ZMQBindError
+            If the worker socket cannot be bound.
+
         """
         self._sender = context.socket(zmq.PUSH)
-        if self._sender.hwm is not None:
-            self._sender.hwm = self.hwm
-            if isinstance(sender_spec, (list, tuple)):
-                self.port = self._sender.bind_to_random_port(*sender_spec)
-            else:
-                sender_spec = self.as_spec(sender_spec,
-                                           self.default_addr + ':{}')
-                self._sender.bind(sender_spec)
-                if isinstance(self.sender_spec, six.string_types):
-                    self.port = int(self.sender_spec.split(':')[-1])
-                else:
-                    self.port = self.sender_spec
-
+        # if self._sender.hwm is not None:
+        #     self._sender.hwm = sender_hwm
+        self.port = bind_to_addr_port_or_range(self._sender, sender_spec,
+                                               self.default_addr)
         self._sink = context.socket(zmq.PUSH)
-        self._sink.connect(self.as_spec(sink_spec, 'tcp://localhost:{}'))
+        self._sink.connect(from_port_or_addr(sink_spec, 'tcp://localhost'))
         super(DivideAndConquerVentilator, self).setup_sockets(context)
 
     @abstractmethod
-    def send(self, socket, *items):
+    def send(self, socket, batch):
         """Send produced batch of work over the socket.
 
         Parameters
         ----------
         socket : zmq.Socket
             The socket on which to send.
-        \*items
-            Arguments representing a batch of work as yielded by
+        batch : object
+            Object representing a batch of work as yielded by
             :method:`produce`.
 
         """
@@ -175,34 +177,45 @@ class DivideAndConquerVentilator(DivideAndConquerBase):
             self.check_setup()
             self._sink.send(b'0')
             for batch in self.produce():
-                self.send(self._sender, *batch)
+                self.send(self._sender, batch)
         finally:
             self.context.destroy()
 
 
 @six.add_metaclass(ABCMeta)
 class DivideAndConquerWorker(DivideAndConquerBase):
-    """A worker receives tasks from a ventilator, sends results to a sink.
+    """A worker receives tasks from a ventilator, sends results to sink."""
 
-    """
+    default_addr = 'tcp://localhost'
+
     @abstractmethod
     def recv(self, socket):
         """Receive a message [from the ventilator] and return it."""
         pass
 
     @abstractmethod
-    def send(self, socket, *to_sink):
-        """Send a group of messages over a socket [to the sink]."""
+    def send(self, socket, result):
+        """Send results over a socket [to the sink].
+
+        Parameters
+        ----------
+        socket : zmq.Socket
+            Socket on which to send results.
+        results : object
+            Object representing results as yielded by :func:`process`.
+
+        """
         pass
 
     @abstractmethod
-    def process(self, *received):
+    def process(self, received):
         """Generator that turns a received chunk into one or more outputs.
 
         Parameters
         ----------
-        \*received
-            A sequence of arguments as returned by :method:`recv`.
+        received : object
+            A received object representing a batch of work as returned by
+            :method:`recv`.
 
         Yields
         ------
@@ -238,11 +251,12 @@ class DivideAndConquerWorker(DivideAndConquerBase):
         self._receiver = context.socket(zmq.PULL)
         if receiver_hwm is not None:
             self._receiver.hwm = receiver_hwm
-        self._receiver.bind(self.as_spec(receiver_spec, 'tcp://*:{}'))
+        self._receiver.connect(from_port_or_addr(receiver_spec,
+                                                 self.default_addr))
         self._sender = context.socket(zmq.PUSH)
         if sender_hwm is not None:
             self._sender.hwm = sender_hwm
-        self._sender.connect(self.as_spec(sender_spec, 'tcp://localhost:{}'))
+        self._sender.connect(from_port_or_addr(sender_spec, self.default_addr))
         super(DivideAndConquerWorker, self).setup_sockets(context)
 
     def done(self):
@@ -254,7 +268,7 @@ class DivideAndConquerWorker(DivideAndConquerBase):
         be dispatched, as it has no idea what other workers have done.
         However there are restricted cases where it is predictable, and
         one could potentially build in a mechanism for the ventilator
-        to communicate this information. THe default implementation
+        to communicate this information. The default implementation
         returns `False` unconditionally.
 
         """
@@ -264,8 +278,8 @@ class DivideAndConquerWorker(DivideAndConquerBase):
         """Loop indefinitely receiving, processing and sending."""
         while not self.done():
             received = self.recv(self._receiver)
-            for output in self.process(*received):
-                self.send(self._sender, *output)
+            for output in self.process(received):
+                self.send(self._sender, output)
 
     def run(self):
         self.check_setup()
@@ -275,13 +289,19 @@ class DivideAndConquerWorker(DivideAndConquerBase):
 @six.add_metaclass(ABCMeta)
 class DivideAndConquerSink(DivideAndConquerBase):
     """A sink receives results from workers and processes them."""
+
+    default_addr = 'tcp://*'
+
+    def __init__(self):
+        self.port = None
+
     @abstractmethod
     def recv(self, socket):
         """Receive and return results from a worker."""
         pass
 
     @abstractmethod
-    def process(self, *results):
+    def process(self, results):
         """Process a batch of results as returned by :method:`recv`."""
         pass
 
@@ -306,11 +326,14 @@ class DivideAndConquerSink(DivideAndConquerBase):
         self._receiver = context.socket(zmq.PULL)
         if receiver_hwm is not None:
             self._receiver.hwm = receiver_hwm
-        self._receiver.bind(self.as_spec(receiver_spec, 'tcp://*:{}'))
+        self.port = bind_to_addr_port_or_range(self._receiver, receiver_spec,
+                                               self.default_addr)
         super(DivideAndConquerSink, self).setup_sockets(context)
 
     def run(self):
         self.check_setup()
+        # Synchronize with the ventilator.
+        self._receiver.recv()
         try:
             while not self.done():
                 self.process(self.recv(self._receiver))
